@@ -3,8 +3,34 @@ const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const http = require('http');
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+if (!process.env.BOT_TOKEN || String(process.env.BOT_TOKEN).trim() === '') {
+  console.error('FATAL: BOT_TOKEN is missing. Add it in Railway → Variables (same name: BOT_TOKEN).');
+  process.exit(1);
+}
+
+// Railway / Render expose PORT and expect something to listen, or the deploy may fail health checks.
+if (process.env.PORT) {
+  http
+    .createServer((_, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('OK');
+    })
+    .listen(Number(process.env.PORT), () => {
+      console.log(`HTTP health check listening on port ${process.env.PORT}`);
+    });
+}
+
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
+
+bot.on('polling_error', (err) => {
+  console.error('[polling_error]', err.code || '', err.message);
+});
+
+bot.on('error', (err) => {
+  console.error('[bot_error]', err.message);
+});
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 const DB_PATH = './db.json';
@@ -193,6 +219,114 @@ function formatBalance(amount) {
   return `$${amount.toFixed(2)}`;
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/** Bottom reply keyboard (Telegram “menu” under the message box) */
+const MENU = {
+  BROWSE: '🛒 Browse',
+  DEPOSIT: '💰 Deposit',
+  ACCOUNT: '👤 Account',
+  PURCHASES: '📦 Purchases',
+  HIDE: '✕ Hide keyboard',
+};
+
+function mainReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text: MENU.BROWSE }, { text: MENU.DEPOSIT }],
+      [{ text: MENU.ACCOUNT }, { text: MENU.PURCHASES }],
+      [{ text: MENU.HIDE }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+function sendMainMenu(chatId) {
+  return bot.sendMessage(chatId, '🏠 <b>Main menu</b>\n\nUse the buttons under the chat or tap below.', {
+    parse_mode: 'HTML',
+    reply_markup: mainMenuKeyboard(),
+  });
+}
+
+function sendBrowse(chatId) {
+  const rows = PRODUCTS.map((p) => [
+    { text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` },
+  ]);
+  rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
+  return bot.sendMessage(chatId, '📂 <b>Available files</b>\n\nPick a product:', {
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: rows },
+  });
+}
+
+function sendDepositIntro(chatId, userId) {
+  updateUser(userId, { state: null });
+  return bot.sendMessage(
+    chatId,
+    `💰 <b>Deposit</b>\n\nPayments run through <b>NOWPayments</b> — your balance updates when the network confirms.\n\nMinimum: <b>$${MIN_DEPOSIT}</b>\n\nHow much (USD)?`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '$5', callback_data: 'dep_amount_5' }, { text: '$10', callback_data: 'dep_amount_10' }],
+          [{ text: '$20', callback_data: 'dep_amount_20' }, { text: '$50', callback_data: 'dep_amount_50' }],
+          [{ text: '✏️ Custom amount', callback_data: 'dep_amount_custom' }],
+          [{ text: '🔙 Back', callback_data: 'main_menu' }],
+        ],
+      },
+    }
+  );
+}
+
+function sendAccount(chatId, userId) {
+  const user = getUser(userId);
+  const db = loadDB();
+  const activePays = db.pendingPayments.filter((p) => p.userId === userId && !FINAL_STATUSES.has(p.status));
+  const pendingText = activePays.length ? `\n⏳ Pending deposits: <b>${activePays.length}</b>` : '';
+  return bot.sendMessage(
+    chatId,
+    `👤 <b>Your account</b>\n\n🆔 ID: <code>${userId}</code>\n💰 Balance: <b>${formatBalance(user.balance)}</b>\n📦 Files owned: <b>${user.purchases.length}</b>${pendingText}`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '💰 Deposit', callback_data: 'deposit' }],
+          [{ text: '🔙 Main menu', callback_data: 'main_menu' }],
+        ],
+      },
+    }
+  );
+}
+
+function sendMyPurchases(chatId, userId) {
+  const user = getUser(userId);
+  if (user.purchases.length === 0) {
+    return bot.sendMessage(chatId, "📦 You haven't bought anything yet.", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🛒 Browse', callback_data: 'browse' }],
+          [{ text: '🔙 Main menu', callback_data: 'main_menu' }],
+        ],
+      },
+    });
+  }
+  const rows = user.purchases.map((pid) => {
+    const p = PRODUCTS.find((x) => x.id === pid);
+    return [{ text: `📥 ${p ? p.name : pid}`, callback_data: `download_${pid}` }];
+  });
+  rows.push([{ text: '🔙 Main menu', callback_data: 'main_menu' }]);
+  return bot.sendMessage(chatId, '📦 <b>Your purchases</b>\n\nTap to download:', {
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: rows },
+  });
+}
+
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -220,35 +354,86 @@ function currencyKeyboard() {
 // ─── /start ───────────────────────────────────────────────────────────────────
 bot.onText(/\/start/, (msg) => {
   const userId = msg.from.id;
-  const name = msg.from.first_name || 'there';
+  const name = escapeHtml(msg.from.first_name || 'there');
   getUser(userId);
   bot.sendMessage(
     msg.chat.id,
-    `👋 *Welcome, ${name}!*\n\nThis is the official file store. Browse our digital products, deposit crypto, and download instantly after purchase.\n\n*What would you like to do?*`,
-    { parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() }
+    `👋 <b>Welcome, ${name}!</b>\n\nUse the <b>keyboard under the chat</b> (Browse, Deposit, …) or the <b>☰ menu</b> for slash commands.\n\nBrowse products, add balance with crypto, and download right after purchase.`,
+    { parse_mode: 'HTML', reply_markup: mainReplyKeyboard() }
   );
 });
 
-// ─── Message Handler (custom deposit amount input) ────────────────────────────
+// ─── Slash shortcuts (also listed in Telegram’s ☰ command menu) ───────────────
+bot.onText(/^\/menu$/i, (msg) => {
+  getUser(msg.from.id);
+  bot.sendMessage(msg.chat.id, '⌨️ Bottom menu:', { reply_markup: mainReplyKeyboard() });
+  sendMainMenu(msg.chat.id);
+});
+bot.onText(/^\/browse$/i, (msg) => {
+  getUser(msg.from.id);
+  sendBrowse(msg.chat.id);
+});
+bot.onText(/^\/deposit$/i, (msg) => {
+  getUser(msg.from.id);
+  sendDepositIntro(msg.chat.id, msg.from.id);
+});
+bot.onText(/^\/account$/i, (msg) => {
+  getUser(msg.from.id);
+  sendAccount(msg.chat.id, msg.from.id);
+});
+bot.onText(/^\/(purchases|my_purchases)$/i, (msg) => {
+  getUser(msg.from.id);
+  sendMyPurchases(msg.chat.id, msg.from.id);
+});
+
+// ─── Message Handler (reply keyboard + custom deposit amount) ────────────────
 bot.on('message', async (msg) => {
-  if (!msg.text || msg.text.startsWith('/')) return;
+  if (!msg.text) return;
+  const text = msg.text.trim();
+  const chatId = msg.chat.id;
   const userId = msg.from.id;
+
+  if (text.startsWith('/')) return;
+
+  if (text === MENU.HIDE) {
+    return bot.sendMessage(chatId, 'Keyboard hidden. Send /start or /menu to open it again.', {
+      reply_markup: { remove_keyboard: true },
+    });
+  }
+
+  if (text === MENU.BROWSE) {
+    getUser(userId);
+    return sendBrowse(chatId);
+  }
+  if (text === MENU.DEPOSIT) {
+    getUser(userId);
+    return sendDepositIntro(chatId, userId);
+  }
+  if (text === MENU.ACCOUNT) {
+    getUser(userId);
+    return sendAccount(chatId, userId);
+  }
+  if (text === MENU.PURCHASES) {
+    getUser(userId);
+    return sendMyPurchases(chatId, userId);
+  }
+
   const user = getUser(userId);
   if (!user.state || user.state !== 'awaiting_deposit_amount') return;
 
-  const amount = parseFloat(msg.text.trim().replace(/[^0-9.]/g, ''));
+  const amount = parseFloat(text.replace(/[^0-9.]/g, ''));
   if (isNaN(amount) || amount < MIN_DEPOSIT) {
     return bot.sendMessage(
-      msg.chat.id,
-      `⚠️ Please enter a valid amount of at least $${MIN_DEPOSIT}.\n\nExample: \`10\` or \`25.50\``,
-      { parse_mode: 'Markdown' }
+      chatId,
+      `⚠️ Enter a valid amount (at least $${MIN_DEPOSIT}).\n\nExample: 10 or 25.50`,
+      { reply_markup: mainReplyKeyboard() }
     );
   }
 
   updateUser(userId, { state: `awaiting_currency:${amount}` });
   return bot.sendMessage(
-    msg.chat.id,
-    `💱 *Select Currency*\n\nDeposit amount: *$${amount.toFixed(2)} USD*\nChoose your preferred cryptocurrency:`,
+    chatId,
+    `💱 *Select currency*\n\nDeposit: *$${amount.toFixed(2)} USD*`,
     { parse_mode: 'Markdown', reply_markup: currencyKeyboard() }
   );
 });
@@ -263,22 +448,12 @@ bot.on('callback_query', async (query) => {
 
   // ── Main Menu ──
   if (data === 'main_menu') {
-    return bot.sendMessage(chatId, '🏠 *Main Menu*', {
-      parse_mode: 'Markdown',
-      reply_markup: mainMenuKeyboard(),
-    });
+    return sendMainMenu(chatId);
   }
 
   // ── Browse Products ──
   if (data === 'browse') {
-    const rows = PRODUCTS.map((p) => [
-      { text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` },
-    ]);
-    rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
-    return bot.sendMessage(chatId, '📂 *Available Files*\n\nSelect a product to view details:', {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: rows },
-    });
+    return sendBrowse(chatId);
   }
 
   // ── Product Detail ──
@@ -353,22 +528,7 @@ bot.on('callback_query', async (query) => {
 
   // ── Deposit: Show amount selection ──
   if (data === 'deposit') {
-    updateUser(userId, { state: null });
-    return bot.sendMessage(
-      chatId,
-      `💰 *Deposit Funds*\n\nPayments are processed *automatically* via NOWPayments — your balance is credited as soon as the blockchain confirms.\n\nMinimum deposit: *$${MIN_DEPOSIT}*\n\nHow much would you like to deposit?`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '$5',  callback_data: 'dep_amount_5'  }, { text: '$10', callback_data: 'dep_amount_10' }],
-            [{ text: '$20', callback_data: 'dep_amount_20' }, { text: '$50', callback_data: 'dep_amount_50' }],
-            [{ text: '✏️ Custom Amount', callback_data: 'dep_amount_custom' }],
-            [{ text: '🔙 Back', callback_data: 'main_menu' }],
-          ],
-        },
-      }
-    );
+    return sendDepositIntro(chatId, userId);
   }
 
   // ── Deposit: Amount button tapped ──
@@ -469,51 +629,12 @@ bot.on('callback_query', async (query) => {
 
   // ── Account ──
   if (data === 'account') {
-    const user = getUser(userId);
-    const db = loadDB();
-    const activePays = db.pendingPayments.filter(
-      (p) => p.userId === userId && !FINAL_STATUSES.has(p.status)
-    );
-    const pendingText = activePays.length
-      ? `\n⏳ Pending deposits: *${activePays.length}*`
-      : '';
-    return bot.sendMessage(
-      chatId,
-      `👤 *Your Account*\n\n🆔 User ID: \`${userId}\`\n💰 Balance: *${formatBalance(user.balance)}*\n📦 Purchases: *${user.purchases.length} files*${pendingText}`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '💰 Deposit',   callback_data: 'deposit'   }],
-            [{ text: '🔙 Main Menu', callback_data: 'main_menu' }],
-          ],
-        },
-      }
-    );
+    return sendAccount(chatId, userId);
   }
 
   // ── My Purchases ──
   if (data === 'my_purchases') {
-    const user = getUser(userId);
-    if (user.purchases.length === 0) {
-      return bot.sendMessage(chatId, "📦 You haven't purchased anything yet.", {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🛒 Browse Files', callback_data: 'browse'    }],
-            [{ text: '🔙 Main Menu',    callback_data: 'main_menu' }],
-          ],
-        },
-      });
-    }
-    const rows = user.purchases.map((pid) => {
-      const p = PRODUCTS.find((x) => x.id === pid);
-      return [{ text: `📥 ${p ? p.name : pid}`, callback_data: `download_${pid}` }];
-    });
-    rows.push([{ text: '🔙 Main Menu', callback_data: 'main_menu' }]);
-    return bot.sendMessage(chatId, '📦 *Your Purchases*\n\nTap any file to download:', {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: rows },
-    });
+    return sendMyPurchases(chatId, userId);
   }
 });
 
@@ -553,7 +674,7 @@ bot.onText(/\/credit (\d+) ([\d.]+)/, (msg, match) => {
   bot.sendMessage(
     targetId,
     `💰 *Your balance has been topped up!*\n\nAmount added: *$${amount.toFixed(2)}*\nNew balance: *$${user.balance.toFixed(2)}*\n\n🎉`,
-    { parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() }
+    { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
   );
 });
 
@@ -586,4 +707,25 @@ bot.onText(/\/payments/, (msg) => {
   bot.sendMessage(msg.chat.id, `⏳ *Active Payments (${active.length}):*\n\n${text}`, { parse_mode: 'Markdown' });
 });
 
-console.log('🤖 Bot is running with NOWPayments integration...');
+bot
+  .deleteWebHook()
+  .then(() => {
+    bot.startPolling();
+    console.log('🤖 Telegram polling started (NOWPayments bot).');
+  })
+  .catch((err) => {
+    console.error('FATAL: could not delete webhook / start polling:', err.message);
+    process.exit(1);
+  });
+
+bot
+  .setMyCommands([
+    { command: 'start', description: 'Welcome & open keyboard' },
+    { command: 'menu', description: 'Main menu' },
+    { command: 'browse', description: 'Browse products' },
+    { command: 'deposit', description: 'Deposit crypto' },
+    { command: 'account', description: 'Balance & user ID' },
+    { command: 'purchases', description: 'Your files' },
+  ])
+  .then(() => console.log('✅ Bot command menu (/) registered'))
+  .catch((err) => console.error('[setMyCommands]', err.message));
