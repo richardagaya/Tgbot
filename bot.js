@@ -181,7 +181,7 @@ async function checkPendingPayments() {
         bot.sendMessage(
           p.userId,
           `✅ *Payment Confirmed!*\n\n*+$${p.usdAmount.toFixed(2)} USD* has been credited to your balance.\nNew balance: *$${user.balance.toFixed(2)}*\n\nYou can now purchase files! 🎉`,
-          { parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() }
+          { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
         );
 
         if (process.env.ADMIN_CHAT_ID) {
@@ -195,7 +195,7 @@ async function checkPendingPayments() {
         bot.sendMessage(
           p.userId,
           `❌ *Payment ${newStatus}*\n\nYour deposit of *$${p.usdAmount.toFixed(2)}* was ${newStatus}. Please try depositing again.`,
-          { parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() }
+          { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
         );
       }
     } catch (err) {
@@ -248,10 +248,11 @@ function mainReplyKeyboard() {
 }
 
 function sendMainMenu(chatId) {
-  return bot.sendMessage(chatId, '🏠 <b>Main menu</b>\n\nUse the buttons under the chat or tap below.', {
-    parse_mode: 'HTML',
-    reply_markup: mainMenuKeyboard(),
-  });
+  return bot.sendMessage(
+    chatId,
+    `🏠 <b>Main menu</b>\n\nEverything runs from the <b>keyboard under the chat</b> — tap a row below.`,
+    { parse_mode: 'HTML', reply_markup: mainReplyKeyboard() }
+  );
 }
 
 function sendBrowse(chatId) {
@@ -327,17 +328,6 @@ function sendMyPurchases(chatId, userId) {
   });
 }
 
-function mainMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: '🛒 Browse Files',    callback_data: 'browse'       }],
-      [{ text: '💰 Deposit Crypto',  callback_data: 'deposit'      }],
-      [{ text: '👤 My Account',      callback_data: 'account'      }],
-      [{ text: '📦 My Purchases',    callback_data: 'my_purchases' }],
-    ],
-  };
-}
-
 function currencyKeyboard() {
   const rows = [];
   for (let i = 0; i < DEPOSIT_CURRENCIES.length; i += 2) {
@@ -358,7 +348,7 @@ bot.onText(/\/start/, (msg) => {
   getUser(userId);
   bot.sendMessage(
     msg.chat.id,
-    `👋 <b>Welcome, ${name}!</b>\n\nUse the <b>keyboard under the chat</b> (Browse, Deposit, …) or the <b>☰ menu</b> for slash commands.\n\nBrowse products, add balance with crypto, and download right after purchase.`,
+    `👋 <b>Welcome, ${name}!</b>\n\nYour controls are the <b>buttons under this chat</b> — Browse, Deposit, Account, Purchases. You can also use the <b>☰</b> menu for slash commands.\n\nAdd balance with crypto, then buy and download instantly.`,
     { parse_mode: 'HTML', reply_markup: mainReplyKeyboard() }
   );
 });
@@ -366,7 +356,6 @@ bot.onText(/\/start/, (msg) => {
 // ─── Slash shortcuts (also listed in Telegram’s ☰ command menu) ───────────────
 bot.onText(/^\/menu$/i, (msg) => {
   getUser(msg.from.id);
-  bot.sendMessage(msg.chat.id, '⌨️ Bottom menu:', { reply_markup: mainReplyKeyboard() });
   sendMainMenu(msg.chat.id);
 });
 bot.onText(/^\/browse$/i, (msg) => {
@@ -606,15 +595,11 @@ bot.on('callback_query', async (query) => {
         `🔢 Amount to send: *${payment.pay_amount} ${currency.toUpperCase()}*\n\n` +
         `📬 *Send to this address:*\n\`${payment.pay_address}\`\n\n` +
         `⏱ Payment expires in *60 minutes.*\n\n` +
-        `✅ Your balance will be credited *automatically* once confirmed on the blockchain. No further action needed!`,
+        `✅ Your balance will be credited *automatically* once the network confirms.\n\n` +
+        `Use the *keyboard below* — tap *Deposit* for another top-up.`,
         {
           parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🏠 Main Menu',              callback_data: 'main_menu' }],
-              [{ text: '💰 Create Another Deposit', callback_data: 'deposit'   }],
-            ],
-          },
+          reply_markup: mainReplyKeyboard(),
         }
       );
     } catch (err) {
@@ -622,7 +607,7 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(
         chatId,
         `❌ *Payment creation failed*\n\n\`${err.message}\`\n\nPlease check your NOWPayments API key or try again.`,
-        { parse_mode: 'Markdown', reply_markup: mainMenuKeyboard() }
+        { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
       );
     }
   }
