@@ -1,0 +1,23 @@
+{
+  "name": "telegram-file-store-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for selling digital files with crypto deposits",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js",
+    "pm2:start": "npx pm2 start ecosystem.config.js",
+    "pm2:stop": "npx pm2 stop tg-bot",
+    "pm2:restart": "npx pm2 restart tg-bot",
+    "pm2:logs": "npx pm2 logs tg-bot",
+    "pm2:status": "npx pm2 status"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "node-telegram-bot-api": "^0.64.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0",
+    "pm2": "^6.0.14"
+  }
+}
