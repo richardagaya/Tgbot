@@ -92,8 +92,8 @@ const PRODUCTS = [
   },
 ];
 
-// Minimum deposit in USD (NOWPayments often needs ~$5–15+ for volatile coins like BTC; stablecoins are lower).
-const MIN_DEPOSIT = Math.max(5, parseFloat(process.env.MIN_DEPOSIT_USD || '10') || 10);
+// Minimum deposit in USD (NOWPayments may still reject $5 on some coins like BTC — USDT is safest for small amounts).
+const MIN_DEPOSIT = Math.max(5, parseFloat(process.env.MIN_DEPOSIT_USD || '5') || 5);
 
 // ─── NOWPayments API ──────────────────────────────────────────────────────────
 const DEPOSIT_CURRENCIES = [
@@ -310,8 +310,9 @@ function sendDepositIntro(chatId, userId) {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [{ text: '$10', callback_data: 'dep_amount_10' }, { text: '$25', callback_data: 'dep_amount_25' }],
-          [{ text: '$50', callback_data: 'dep_amount_50' }, { text: '$100', callback_data: 'dep_amount_100' }],
+          [{ text: '$5', callback_data: 'dep_amount_5' }, { text: '$10', callback_data: 'dep_amount_10' }],
+          [{ text: '$25', callback_data: 'dep_amount_25' }, { text: '$50', callback_data: 'dep_amount_50' }],
+          [{ text: '$100', callback_data: 'dep_amount_100' }],
           [{ text: '✏️ Custom amount', callback_data: 'dep_amount_custom' }],
           [{ text: '🔙 Back', callback_data: 'main_menu' }],
         ],
