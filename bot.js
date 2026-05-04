@@ -92,7 +92,8 @@ const PRODUCTS = [
   },
 ];
 
-const MIN_DEPOSIT = 1.00;
+// Minimum deposit in USD (NOWPayments often needs ~$5–15+ for volatile coins like BTC; stablecoins are lower).
+const MIN_DEPOSIT = Math.max(5, parseFloat(process.env.MIN_DEPOSIT_USD || '10') || 10);
 
 // ─── NOWPayments API ──────────────────────────────────────────────────────────
 const DEPOSIT_CURRENCIES = [
@@ -149,6 +150,40 @@ async function createNowPayment(userId, usdAmount, currency) {
     is_fixed_rate: false,
     is_fee_paid_by_user: true,
   });
+}
+
+/** Compare estimated pay-crypto vs NOWPayments minimum for that coin (reduces “amountTo is too small”). */
+async function assertDepositMeetsNowPaymentsMinimum(usdAmount, payCurrency) {
+  const q = (k, v) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`;
+  let minRaw;
+  try {
+    minRaw = await nowPaymentsRequest('GET', `/min-amount?${q('currency_from', payCurrency)}&${q('currency_to', 'usd')}`);
+  } catch {
+    return;
+  }
+  if (!minRaw || minRaw.status === false || minRaw.min_amount == null) return;
+
+  let estRaw;
+  try {
+    estRaw = await nowPaymentsRequest(
+      'GET',
+      `/estimate?${q('amount', usdAmount)}&${q('currency_from', 'usd')}&${q('currency_to', payCurrency)}`
+    );
+  } catch {
+    return;
+  }
+  if (!estRaw || estRaw.status === false) return;
+
+  const minCrypto = Number(minRaw.min_amount);
+  const estCrypto = Number(estRaw.estimated_amount);
+  if (!Number.isFinite(minCrypto) || !Number.isFinite(estCrypto) || minCrypto <= 0 || estCrypto <= 0) return;
+
+  if (estCrypto < minCrypto * 0.999) {
+    const bump = Math.ceil((usdAmount * (minCrypto / estCrypto)) * 1.08 * 10) / 10;
+    throw new Error(
+      `This USD amount converts to too little ${payCurrency.toUpperCase()} for NOWPayments' minimum.\n\nTry at least ~$${bump} for this coin, or pick USDT (TRC20) for lower minimums.`
+    );
+  }
 }
 
 async function getNowPaymentStatus(paymentId) {
@@ -275,8 +310,8 @@ function sendDepositIntro(chatId, userId) {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [{ text: '$5', callback_data: 'dep_amount_5' }, { text: '$10', callback_data: 'dep_amount_10' }],
-          [{ text: '$20', callback_data: 'dep_amount_20' }, { text: '$50', callback_data: 'dep_amount_50' }],
+          [{ text: '$10', callback_data: 'dep_amount_10' }, { text: '$25', callback_data: 'dep_amount_25' }],
+          [{ text: '$50', callback_data: 'dep_amount_50' }, { text: '$100', callback_data: 'dep_amount_100' }],
           [{ text: '✏️ Custom amount', callback_data: 'dep_amount_custom' }],
           [{ text: '🔙 Back', callback_data: 'main_menu' }],
         ],
@@ -566,10 +601,17 @@ bot.on('callback_query', async (query) => {
     await bot.sendMessage(chatId, '⏳ Creating your payment address...');
 
     try {
+      await assertDepositMeetsNowPaymentsMinimum(usdAmount, currency);
       const payment = await createNowPayment(userId, usdAmount, currency);
 
       if (!payment.payment_id || !payment.pay_address) {
-        throw new Error(payment.message || JSON.stringify(payment));
+        const apiMsg = payment.message || JSON.stringify(payment);
+        if (/too small|amountTo/i.test(String(apiMsg))) {
+          throw new Error(
+            'That amount is too small for this cryptocurrency on NOWPayments.\n\nTry USDT (TRC20) or a higher USD amount (often $20+ for BTC/ETH).'
+          );
+        }
+        throw new Error(apiMsg);
       }
 
       const db = loadDB();
@@ -606,8 +648,8 @@ bot.on('callback_query', async (query) => {
       console.error('[deposit] Error creating payment:', err.message);
       return bot.sendMessage(
         chatId,
-        `❌ *Payment creation failed*\n\n\`${err.message}\`\n\nPlease check your NOWPayments API key or try again.`,
-        { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
+        `❌ Payment could not be created\n\n${err.message}\n\nIf this persists, try USDT (TRC20) or a higher USD amount.`,
+        { reply_markup: mainReplyKeyboard() }
       );
     }
   }
