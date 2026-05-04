@@ -92,20 +92,18 @@ const PRODUCTS = [
   },
 ];
 
-// Minimum deposit in USD (NOWPayments may still reject $5 on some coins like BTC — USDT is safest for small amounts).
-const MIN_DEPOSIT = Math.max(5, parseFloat(process.env.MIN_DEPOSIT_USD || '5') || 5);
+const MIN_DEPOSIT = 10; // USD — minimum deposit amount in the bot
 
 // ─── NOWPayments API ──────────────────────────────────────────────────────────
 const DEPOSIT_CURRENCIES = [
   { label: 'USDT (TRC20)', value: 'usdttrc20' },
   { label: 'USDT (ERC20)', value: 'usdterc20' },
-  { label: 'BTC',          value: 'btc'        },
-  { label: 'ETH',          value: 'eth'        },
-  { label: 'LTC',          value: 'ltc'        },
-  { label: 'TRX',          value: 'trx'        },
+  { label: 'BTC',          value: 'btc' },
+  { label: 'ETH',          value: 'eth' },
+  { label: 'LTC',          value: 'ltc' },
+  { label: 'TRX',          value: 'trx' },
 ];
 
-// Terminal statuses — no need to poll these again
 const FINAL_STATUSES = new Set(['finished', 'confirmed', 'failed', 'expired', 'refunded']);
 
 function nowPaymentsRequest(method, endpoint, body = null) {
@@ -152,7 +150,6 @@ async function createNowPayment(userId, usdAmount, currency) {
   });
 }
 
-/** Compare estimated pay-crypto vs NOWPayments minimum for that coin (reduces “amountTo is too small”). */
 async function assertDepositMeetsNowPaymentsMinimum(usdAmount, payCurrency) {
   const q = (k, v) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`;
   let minRaw;
@@ -190,7 +187,6 @@ async function getNowPaymentStatus(paymentId) {
   return nowPaymentsRequest('GET', `/payment/${paymentId}`);
 }
 
-// ─── Automatic Payment Polling (every 60 s) ───────────────────────────────────
 async function checkPendingPayments() {
   const db = loadDB();
   const active = db.pendingPayments.filter((p) => !FINAL_STATUSES.has(p.status));
@@ -208,7 +204,6 @@ async function checkPendingPayments() {
       changed = true;
 
       if (newStatus === 'finished' || newStatus === 'confirmed') {
-        // Credit the user
         const user = db.users[p.userId] || { balance: 0, purchases: [], state: null };
         user.balance = parseFloat((user.balance + p.usdAmount).toFixed(2));
         db.users[p.userId] = user;
@@ -239,7 +234,6 @@ async function checkPendingPayments() {
   }
 
   if (changed) {
-    // Keep all active + last 100 finalized for history
     const done = db.pendingPayments.filter((p) => FINAL_STATUSES.has(p.status)).slice(-100);
     const still_active = db.pendingPayments.filter((p) => !FINAL_STATUSES.has(p.status));
     db.pendingPayments = [...still_active, ...done];
@@ -305,20 +299,20 @@ function sendDepositIntro(chatId, userId) {
   updateUser(userId, { state: null });
   return bot.sendMessage(
     chatId,
-    `💰 <b>Deposit</b>\n\nPayments run through <b>NOWPayments</b> — your balance updates when the network confirms.\n\nMinimum: <b>$${MIN_DEPOSIT}</b>\n\nHow much (USD)?`,
-    {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '$5', callback_data: 'dep_amount_5' }, { text: '$10', callback_data: 'dep_amount_10' }],
-          [{ text: '$25', callback_data: 'dep_amount_25' }, { text: '$50', callback_data: 'dep_amount_50' }],
-          [{ text: '$100', callback_data: 'dep_amount_100' }],
-          [{ text: '✏️ Custom amount', callback_data: 'dep_amount_custom' }],
-          [{ text: '🔙 Back', callback_data: 'main_menu' }],
-        ],
-      },
-    }
+    `💰 <b>Deposit</b>\n\nPayments run through <b>NOWPayments</b> — your balance updates automatically when the network confirms.\n\nMinimum: <b>$${MIN_DEPOSIT}</b> USD\n\nHow much do you want to deposit?`,
+    { parse_mode: 'HTML', reply_markup: depositAmountInlineKeyboard() }
   );
+}
+
+function depositAmountInlineKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '$10', callback_data: 'dep_amount_10' }, { text: '$25', callback_data: 'dep_amount_25' }],
+      [{ text: '$50', callback_data: 'dep_amount_50' }, { text: '$100', callback_data: 'dep_amount_100' }],
+      [{ text: '✏️ Custom amount', callback_data: 'dep_amount_custom' }],
+      [{ text: '🔙 Back', callback_data: 'main_menu' }],
+    ],
+  };
 }
 
 function sendAccount(chatId, userId) {
@@ -444,6 +438,7 @@ bot.on('message', async (msg) => {
   }
 
   const user = getUser(userId);
+
   if (!user.state || user.state !== 'awaiting_deposit_amount') return;
 
   const amount = parseFloat(text.replace(/[^0-9.]/g, ''));
@@ -579,7 +574,7 @@ bot.on('callback_query', async (query) => {
     );
   }
 
-  // ── Deposit: Currency selected → create NOWPayments payment ──
+  // ── Deposit: Currency → NOWPayments payment ─────────────────────────────────
   if (data.startsWith('dep_currency_')) {
     const currency = data.replace('dep_currency_', '');
     const user = getUser(userId);
@@ -596,6 +591,14 @@ bot.on('callback_query', async (query) => {
       return bot.sendMessage(chatId, '⚠️ Invalid amount. Please start the deposit again.', {
         reply_markup: { inline_keyboard: [[{ text: '💰 Deposit', callback_data: 'deposit' }]] },
       });
+    }
+
+    if (!process.env.NOWPAYMENTS_API_KEY) {
+      return bot.sendMessage(
+        chatId,
+        'NOWPayments is not configured (missing NOWPAYMENTS_API_KEY).',
+        { reply_markup: mainReplyKeyboard() }
+      );
     }
 
     updateUser(userId, { state: null });
@@ -632,24 +635,20 @@ bot.on('callback_query', async (query) => {
 
       return bot.sendMessage(
         chatId,
-        `📤 *Payment Created!*\n\n` +
-        `💵 You are depositing: *$${usdAmount.toFixed(2)} USD*\n` +
-        `💱 Pay with: *${currencyLabel}*\n` +
-        `🔢 Amount to send: *${payment.pay_amount} ${currency.toUpperCase()}*\n\n` +
-        `📬 *Send to this address:*\n\`${payment.pay_address}\`\n\n` +
-        `⏱ Payment expires in *60 minutes.*\n\n` +
-        `✅ Your balance will be credited *automatically* once the network confirms.\n\n` +
-        `Use the *keyboard below* — tap *Deposit* for another top-up.`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: mainReplyKeyboard(),
-        }
+        `📤 *Payment created*\n\n` +
+          `💵 *$${usdAmount.toFixed(2)} USD*\n` +
+          `💱 *${currencyLabel}*\n` +
+          `🔢 Send: *${payment.pay_amount} ${currency.toUpperCase()}*\n\n` +
+          `📬 *Address:*\n\`${payment.pay_address}\`\n\n` +
+          `⏱ Expires in about *60 minutes*.\n\n` +
+          `✅ Your balance updates *automatically* when NOWPayments confirms the payment.`,
+        { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
       );
     } catch (err) {
       console.error('[deposit] Error creating payment:', err.message);
       return bot.sendMessage(
         chatId,
-        `❌ Payment could not be created\n\n${err.message}\n\nIf this persists, try USDT (TRC20) or a higher USD amount.`,
+        `❌ Payment could not be created\n\n${err.message}\n\nTry USDT (TRC20) or a higher USD amount.`,
         { reply_markup: mainReplyKeyboard() }
       );
     }
@@ -723,23 +722,23 @@ bot.onText(/\/orders/, (msg) => {
   bot.sendMessage(msg.chat.id, `📦 *Recent Orders:*\n\n${text}`, { parse_mode: 'Markdown' });
 });
 
-// /payments — active NOWPayments deposits
+// /payments — active NOWPayments deposits (admin)
 bot.onText(/\/payments/, (msg) => {
   if (String(msg.from.id) !== process.env.ADMIN_CHAT_ID) return;
   const db = loadDB();
   const active = db.pendingPayments.filter((p) => !FINAL_STATUSES.has(p.status));
-  if (!active.length) return bot.sendMessage(msg.chat.id, '✅ No active pending payments.');
+  if (!active.length) return bot.sendMessage(msg.chat.id, '✅ No active pending NOWPayments.');
   const text = active
     .map((p) => `• User \`${p.userId}\` — $${p.usdAmount} ${p.currency.toUpperCase()} — *${p.status}*\n  ID: \`${p.paymentId}\``)
     .join('\n\n');
-  bot.sendMessage(msg.chat.id, `⏳ *Active Payments (${active.length}):*\n\n${text}`, { parse_mode: 'Markdown' });
+  bot.sendMessage(msg.chat.id, `⏳ *Active payments (${active.length}):*\n\n${text}`, { parse_mode: 'Markdown' });
 });
 
 bot
   .deleteWebHook()
   .then(() => {
     bot.startPolling();
-    console.log('🤖 Telegram polling started (NOWPayments bot).');
+    console.log('🤖 Telegram polling started (NOWPayments + file store).');
   })
   .catch((err) => {
     console.error('FATAL: could not delete webhook / start polling:', err.message);
@@ -751,9 +750,13 @@ bot
     { command: 'start', description: 'Welcome & open keyboard' },
     { command: 'menu', description: 'Main menu' },
     { command: 'browse', description: 'Browse products' },
-    { command: 'deposit', description: 'Deposit crypto' },
+    { command: 'deposit', description: 'Deposit crypto (NOWPayments)' },
     { command: 'account', description: 'Balance & user ID' },
     { command: 'purchases', description: 'Your files' },
   ])
   .then(() => console.log('✅ Bot command menu (/) registered'))
   .catch((err) => console.error('[setMyCommands]', err.message));
+
+if (!process.env.NOWPAYMENTS_API_KEY) {
+  console.warn('[NOWPayments] NOWPAYMENTS_API_KEY missing — deposits will fail until set.');
+}
