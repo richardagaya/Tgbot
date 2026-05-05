@@ -64,13 +64,20 @@ function updateUser(userId, data) {
   saveDB(db);
 }
 
-// ─── Product Catalog ──────────────────────────────────────────────────────────
+/** Edit welcome HTML for /start. Use {{name}} for the user's first name (already escaped). */
+const WELCOME_MESSAGE_TEMPLATE = `👋 <b>Welcome, {{name}}!</b>
+
+Use the <b>keyboard below</b> — Browse, Deposit, Account, Purchases — or the <b>☰</b> menu for commands.
+
+Add funds, pick a product from the shop, and download your files instantly.`;
+
+// ─── Product catalog (flat list; placement in the shop is defined in STORE) ─
 const PRODUCTS = [
   {
     id: 'p1',
     name: '📘 Airbnb Revenue Playbook',
     description: 'Step-by-step guide to maximize your short-term rental income.',
-    price: 5.00,
+    price: 5.0,
     fileId: null,
     filePath: null,
   },
@@ -78,7 +85,7 @@ const PRODUCTS = [
     id: 'p2',
     name: '📊 Host Finance Spreadsheet',
     description: 'Complete P&L, expense tracker & tax-ready template.',
-    price: 8.00,
+    price: 8.0,
     fileId: null,
     filePath: null,
   },
@@ -86,11 +93,58 @@ const PRODUCTS = [
     id: 'p3',
     name: '🚀 Listing Optimization Checklist',
     description: 'Boost your visibility and conversion rate on Airbnb.',
-    price: 3.00,
+    price: 3.0,
     fileId: null,
     filePath: null,
   },
 ];
+
+/** Category → subcategory → sub-subcategory → product ids (callback paths use these ids; keep them short). */
+const STORE = [
+  {
+    id: 'rental',
+    name: '🏠 Short-term rentals',
+    subs: [
+      {
+        id: 'edu',
+        name: '📚 Guides & playbooks',
+        subs: [
+          { id: 'rev', name: '💵 Revenue & pricing', productIds: ['p1'] },
+          { id: 'list', name: '🚀 Listings & growth', productIds: ['p3'] },
+        ],
+      },
+      {
+        id: 'fin',
+        name: '💼 Finance & operations',
+        subs: [{ id: 'sheets', name: '📊 Spreadsheets & templates', productIds: ['p2'] }],
+      },
+    ],
+  },
+];
+
+function encodeStorePath(parts) {
+  if (!parts || parts.length === 0) return 'browse';
+  return `st:${parts.join(':')}`;
+}
+
+function decodeStorePath(data) {
+  if (data === 'browse' || data === 'browse_store') return [];
+  if (data.startsWith('st:')) return data.slice(3).split(':').filter(Boolean);
+  return null;
+}
+
+function resolveStore(parts) {
+  if (!parts.length) return { kind: 'root' };
+  const cat = STORE.find((c) => c.id === parts[0]);
+  if (!cat) return null;
+  if (parts.length === 1) return { kind: 'cat', cat };
+  const sub = cat.subs.find((s) => s.id === parts[1]);
+  if (!sub) return null;
+  if (parts.length === 2) return { kind: 'sub', cat, sub };
+  const subsub = sub.subs.find((x) => x.id === parts[2]);
+  if (!subsub || !Array.isArray(subsub.productIds)) return null;
+  return { kind: 'leaf', cat, sub, subsub, parentPath: [parts[0], parts[1]] };
+}
 
 const MIN_DEPOSIT = 10; // USD — minimum deposit amount in the bot
 
@@ -127,7 +181,7 @@ function nowPaymentsRequest(method, endpoint, body = null) {
         try {
           resolve(JSON.parse(data));
         } catch (e) {
-          reject(new Error(`NOWPayments returned invalid JSON: ${data.slice(0, 200)}`));
+          reject(new Error(`Payments returned invalid JSON: ${data.slice(0, 200)}`));
         }
       });
     });
@@ -178,7 +232,7 @@ async function assertDepositMeetsNowPaymentsMinimum(usdAmount, payCurrency) {
   if (estCrypto < minCrypto * 0.999) {
     const bump = Math.ceil((usdAmount * (minCrypto / estCrypto)) * 1.08 * 10) / 10;
     throw new Error(
-      `This USD amount converts to too little ${payCurrency.toUpperCase()} for NOWPayments' minimum.\n\nTry at least ~$${bump} for this coin, or pick USDT (TRC20) for lower minimums.`
+      `This USD amount converts to too little ${payCurrency.toUpperCase()} for this network's minimum.\n\nTry at least ~$${bump}, or pick USDT (TRC20) for lower minimums.`
     );
   }
 }
@@ -217,7 +271,7 @@ async function checkPendingPayments() {
         if (process.env.ADMIN_CHAT_ID) {
           bot.sendMessage(
             process.env.ADMIN_CHAT_ID,
-            `✅ Auto-credited *$${p.usdAmount.toFixed(2)}* to user \`${p.userId}\` (NOWPayments ID: \`${p.paymentId}\`)`,
+            `✅ Auto-credited *$${p.usdAmount.toFixed(2)}* to user \`${p.userId}\` (payment \`${p.paymentId}\`)`,
             { parse_mode: 'Markdown' }
           );
         }
@@ -285,21 +339,57 @@ function sendMainMenu(chatId) {
 }
 
 function sendBrowse(chatId) {
-  const rows = PRODUCTS.map((p) => [
-    { text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` },
-  ]);
-  rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
-  return bot.sendMessage(chatId, '📂 <b>Available files</b>\n\nPick a product:', {
-    parse_mode: 'HTML',
-    reply_markup: { inline_keyboard: rows },
-  });
+  return sendBrowseAt(chatId, []);
+}
+
+function sendBrowseAt(chatId, parts) {
+  const r = resolveStore(parts);
+  if (!r) {
+    return bot.sendMessage(chatId, '⚠️ That section is not available. Open the shop again.', {
+      reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
+    });
+  }
+
+  const rows = [];
+  let body = '📂 <b>Shop</b>';
+
+  if (r.kind === 'root') {
+    body += '\n\nChoose a <b>category</b>:';
+    for (const c of STORE) {
+      rows.push([{ text: c.name, callback_data: encodeStorePath([c.id]) }]);
+    }
+    rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
+  } else if (r.kind === 'cat') {
+    body += `\n\n${escapeHtml(r.cat.name)}\nPick a <b>subcategory</b>:`;
+    for (const s of r.cat.subs) {
+      rows.push([{ text: s.name, callback_data: encodeStorePath([parts[0], s.id]) }]);
+    }
+    rows.push([{ text: '🔙 Back', callback_data: 'browse' }]);
+  } else if (r.kind === 'sub') {
+    body += `\n\n${escapeHtml(r.sub.name)}\nPick a <b>section</b>:`;
+    for (const ss of r.sub.subs) {
+      rows.push([{ text: ss.name, callback_data: encodeStorePath([parts[0], parts[1], ss.id]) }]);
+    }
+    rows.push([{ text: '🔙 Back', callback_data: encodeStorePath([parts[0]]) }]);
+  } else if (r.kind === 'leaf') {
+    const list = r.subsub.productIds
+      .map((id) => PRODUCTS.find((p) => p.id === id))
+      .filter(Boolean);
+    body += `\n\n${escapeHtml(r.subsub.name)}\nPick a <b>product</b>:`;
+    for (const p of list) {
+      rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
+    }
+    rows.push([{ text: '🔙 Back', callback_data: encodeStorePath(r.parentPath) }]);
+  }
+
+  return bot.sendMessage(chatId, body, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
 }
 
 function sendDepositIntro(chatId, userId) {
   updateUser(userId, { state: null });
   return bot.sendMessage(
     chatId,
-    `💰 <b>Deposit</b>\n\nPayments run through <b>NOWPayments</b> — your balance updates automatically when the network confirms.\n\nMinimum: <b>$${MIN_DEPOSIT}</b> USD\n\nHow much do you want to deposit?`,
+    `💰 <b>Deposit</b>\n\nTop up in crypto — your balance updates automatically once the network confirms.\n\nMinimum: <b>$${MIN_DEPOSIT}</b> USD\n\nHow much do you want to deposit?`,
     { parse_mode: 'HTML', reply_markup: depositAmountInlineKeyboard() }
   );
 }
@@ -376,11 +466,8 @@ bot.onText(/\/start/, (msg) => {
   const userId = msg.from.id;
   const name = escapeHtml(msg.from.first_name || 'there');
   getUser(userId);
-  bot.sendMessage(
-    msg.chat.id,
-    `👋 <b>Welcome, ${name}!</b>\n\nYour controls are the <b>buttons under this chat</b> — Browse, Deposit, Account, Purchases. You can also use the <b>☰</b> menu for slash commands.\n\nAdd balance with crypto, then buy and download instantly.`,
-    { parse_mode: 'HTML', reply_markup: mainReplyKeyboard() }
-  );
+  const text = WELCOME_MESSAGE_TEMPLATE.replace(/\{\{name\}\}/g, name);
+  bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML', reply_markup: mainReplyKeyboard() });
 });
 
 // ─── Slash shortcuts (also listed in Telegram’s ☰ command menu) ───────────────
@@ -471,9 +558,12 @@ bot.on('callback_query', async (query) => {
     return sendMainMenu(chatId);
   }
 
-  // ── Browse Products ──
+  // ── Browse shop (categories → sub → sub-sub → products) ──
   if (data === 'browse') {
-    return sendBrowse(chatId);
+    return sendBrowseAt(chatId, []);
+  }
+  if (data.startsWith('st:')) {
+    return sendBrowseAt(chatId, decodeStorePath(data));
   }
 
   // ── Product Detail ──
@@ -596,7 +686,7 @@ bot.on('callback_query', async (query) => {
     if (!process.env.NOWPAYMENTS_API_KEY) {
       return bot.sendMessage(
         chatId,
-        'NOWPayments is not configured (missing NOWPAYMENTS_API_KEY).',
+        'Deposits are temporarily unavailable. Please try again later or contact support.',
         { reply_markup: mainReplyKeyboard() }
       );
     }
@@ -612,7 +702,7 @@ bot.on('callback_query', async (query) => {
         const apiMsg = payment.message || JSON.stringify(payment);
         if (/too small|amountTo/i.test(String(apiMsg))) {
           throw new Error(
-            'That amount is too small for this cryptocurrency on NOWPayments.\n\nTry USDT (TRC20) or a higher USD amount (often $20+ for BTC/ETH).'
+            'That amount is too small for this cryptocurrency.\n\nTry USDT (TRC20) or a higher USD amount (often $20+ for BTC/ETH).'
           );
         }
         throw new Error(apiMsg);
@@ -641,7 +731,7 @@ bot.on('callback_query', async (query) => {
           `🔢 Send: *${payment.pay_amount} ${currency.toUpperCase()}*\n\n` +
           `📬 *Address:*\n\`${payment.pay_address}\`\n\n` +
           `⏱ Expires in about *60 minutes*.\n\n` +
-          `✅ Your balance updates *automatically* when NOWPayments confirms the payment.`,
+          `✅ Your balance updates *automatically* once the payment is confirmed.`,
         { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
       );
     } catch (err) {
@@ -722,12 +812,12 @@ bot.onText(/\/orders/, (msg) => {
   bot.sendMessage(msg.chat.id, `📦 *Recent Orders:*\n\n${text}`, { parse_mode: 'Markdown' });
 });
 
-// /payments — active NOWPayments deposits (admin)
+// /payments — active crypto deposits (admin)
 bot.onText(/\/payments/, (msg) => {
   if (String(msg.from.id) !== process.env.ADMIN_CHAT_ID) return;
   const db = loadDB();
   const active = db.pendingPayments.filter((p) => !FINAL_STATUSES.has(p.status));
-  if (!active.length) return bot.sendMessage(msg.chat.id, '✅ No active pending NOWPayments.');
+  if (!active.length) return bot.sendMessage(msg.chat.id, '✅ No active pending deposits.');
   const text = active
     .map((p) => `• User \`${p.userId}\` — $${p.usdAmount} ${p.currency.toUpperCase()} — *${p.status}*\n  ID: \`${p.paymentId}\``)
     .join('\n\n');
@@ -738,7 +828,7 @@ bot
   .deleteWebHook()
   .then(() => {
     bot.startPolling();
-    console.log('🤖 Telegram polling started (NOWPayments + file store).');
+    console.log('🤖 Telegram polling started.');
   })
   .catch((err) => {
     console.error('FATAL: could not delete webhook / start polling:', err.message);
@@ -750,7 +840,7 @@ bot
     { command: 'start', description: 'Welcome & open keyboard' },
     { command: 'menu', description: 'Main menu' },
     { command: 'browse', description: 'Browse products' },
-    { command: 'deposit', description: 'Deposit crypto (NOWPayments)' },
+    { command: 'deposit', description: 'Deposit crypto to your balance' },
     { command: 'account', description: 'Balance & user ID' },
     { command: 'purchases', description: 'Your files' },
   ])
@@ -758,5 +848,5 @@ bot
   .catch((err) => console.error('[setMyCommands]', err.message));
 
 if (!process.env.NOWPAYMENTS_API_KEY) {
-  console.warn('[NOWPayments] NOWPAYMENTS_API_KEY missing — deposits will fail until set.');
+  console.warn('[deposit] NOWPAYMENTS_API_KEY missing — deposits disabled until set.');
 }
