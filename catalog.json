@@ -1,0 +1,49 @@
+{
+  "products": [
+    {
+      "id": "p1",
+      "name": "📘 Airbnb Revenue Playbook",
+      "description": "Step-by-step guide to maximize your short-term rental income.",
+      "price": 5,
+      "fileId": null,
+      "filePath": null
+    },
+    {
+      "id": "p2",
+      "name": "📊 Host Finance Spreadsheet",
+      "description": "Complete P&L, expense tracker & tax-ready template.",
+      "price": 8,
+      "fileId": null,
+      "filePath": null
+    },
+    {
+      "id": "p3",
+      "name": "🚀 Listing Optimization Checklist",
+      "description": "Boost your visibility and conversion rate on Airbnb.",
+      "price": 3,
+      "fileId": null,
+      "filePath": null
+    }
+  ],
+  "store": [
+    {
+      "id": "rental",
+      "name": "🏠 Short-term rentals",
+      "subs": [
+        {
+          "id": "edu",
+          "name": "📚 Guides & playbooks",
+          "subs": [
+            { "id": "rev", "name": "💵 Revenue & pricing", "productIds": ["p1"] },
+            { "id": "list", "name": "🚀 Listings & growth", "productIds": ["p3"] }
+          ]
+        },
+        {
+          "id": "fin",
+          "name": "💼 Finance & operations",
+          "subs": [{ "id": "sheets", "name": "📊 Spreadsheets & templates", "productIds": ["p2"] }]
+        }
+      ]
+    }
+  ]
+}

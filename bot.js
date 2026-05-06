@@ -4,21 +4,47 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const catalog = require('./catalog');
+const { tryHandleCatalogAdmin, ADMIN_PATH } = require('./catalog-admin');
+
+catalog.ensureCatalogFile();
 
 if (!process.env.BOT_TOKEN || String(process.env.BOT_TOKEN).trim() === '') {
   console.error('FATAL: BOT_TOKEN is missing. Add it in Railway → Variables (same name: BOT_TOKEN).');
   process.exit(1);
 }
 
-// Railway / Render expose PORT and expect something to listen, or the deploy may fail health checks.
-if (process.env.PORT) {
+// Railway / Render: PORT. Local admin UI: set ADMIN_HTTP_PORT if you have no PORT.
+const HTTP_PORT = Number(process.env.PORT || process.env.ADMIN_HTTP_PORT || 0);
+if (HTTP_PORT) {
   http
-    .createServer((_, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('OK');
+    .createServer((req, res) => {
+      (async () => {
+        try {
+          if (await tryHandleCatalogAdmin(req, res)) return;
+        } catch (e) {
+          console.error('[http]', e.message);
+          if (!res.writableEnded) {
+            res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('Server error');
+          }
+          return;
+        }
+        const u = req.url || '/';
+        if (u === '/' || u === '/health' || u.startsWith('/?')) {
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('OK');
+          return;
+        }
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Not found');
+      })();
     })
-    .listen(Number(process.env.PORT), () => {
-      console.log(`HTTP health check listening on port ${process.env.PORT}`);
+    .listen(HTTP_PORT, () => {
+      console.log(`HTTP listening on port ${HTTP_PORT} (health: /, catalog admin: ${ADMIN_PATH})`);
+      if (process.env.ADMIN_CATALOG_TOKEN) {
+        console.log(`[catalog] Open admin: http://127.0.0.1:${HTTP_PORT}${ADMIN_PATH}?token=YOUR_ADMIN_CATALOG_TOKEN`);
+      }
     });
 }
 
@@ -71,80 +97,7 @@ Use the <b>keyboard below</b> — Browse, Deposit, Account, Purchases — or the
 
 Add funds, pick a product from the shop, and download your files instantly.`;
 
-// ─── Product catalog (flat list; placement in the shop is defined in STORE) ─
-const PRODUCTS = [
-  {
-    id: 'p1',
-    name: '📘 Airbnb Revenue Playbook',
-    description: 'Step-by-step guide to maximize your short-term rental income.',
-    price: 5.0,
-    fileId: null,
-    filePath: null,
-  },
-  {
-    id: 'p2',
-    name: '📊 Host Finance Spreadsheet',
-    description: 'Complete P&L, expense tracker & tax-ready template.',
-    price: 8.0,
-    fileId: null,
-    filePath: null,
-  },
-  {
-    id: 'p3',
-    name: '🚀 Listing Optimization Checklist',
-    description: 'Boost your visibility and conversion rate on Airbnb.',
-    price: 3.0,
-    fileId: null,
-    filePath: null,
-  },
-];
-
-/** Category → subcategory → sub-subcategory → product ids (callback paths use these ids; keep them short). */
-const STORE = [
-  {
-    id: 'rental',
-    name: '🏠 Short-term rentals',
-    subs: [
-      {
-        id: 'edu',
-        name: '📚 Guides & playbooks',
-        subs: [
-          { id: 'rev', name: '💵 Revenue & pricing', productIds: ['p1'] },
-          { id: 'list', name: '🚀 Listings & growth', productIds: ['p3'] },
-        ],
-      },
-      {
-        id: 'fin',
-        name: '💼 Finance & operations',
-        subs: [{ id: 'sheets', name: '📊 Spreadsheets & templates', productIds: ['p2'] }],
-      },
-    ],
-  },
-];
-
-function encodeStorePath(parts) {
-  if (!parts || parts.length === 0) return 'browse';
-  return `st:${parts.join(':')}`;
-}
-
-function decodeStorePath(data) {
-  if (data === 'browse' || data === 'browse_store') return [];
-  if (data.startsWith('st:')) return data.slice(3).split(':').filter(Boolean);
-  return null;
-}
-
-function resolveStore(parts) {
-  if (!parts.length) return { kind: 'root' };
-  const cat = STORE.find((c) => c.id === parts[0]);
-  if (!cat) return null;
-  if (parts.length === 1) return { kind: 'cat', cat };
-  const sub = cat.subs.find((s) => s.id === parts[1]);
-  if (!sub) return null;
-  if (parts.length === 2) return { kind: 'sub', cat, sub };
-  const subsub = sub.subs.find((x) => x.id === parts[2]);
-  if (!subsub || !Array.isArray(subsub.productIds)) return null;
-  return { kind: 'leaf', cat, sub, subsub, parentPath: [parts[0], parts[1]] };
-}
+// Products & shop layout live in catalog.json (see catalog.js). Admin UI: /admin/catalog
 
 const MIN_DEPOSIT = 10; // USD — minimum deposit amount in the bot
 
@@ -343,7 +296,7 @@ function sendBrowse(chatId) {
 }
 
 function sendBrowseAt(chatId, parts) {
-  const r = resolveStore(parts);
+  const r = catalog.resolveStore(parts);
   if (!r) {
     return bot.sendMessage(chatId, '⚠️ That section is not available. Open the shop again.', {
       reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
@@ -355,31 +308,31 @@ function sendBrowseAt(chatId, parts) {
 
   if (r.kind === 'root') {
     body += '\n\nChoose a <b>category</b>:';
-    for (const c of STORE) {
-      rows.push([{ text: c.name, callback_data: encodeStorePath([c.id]) }]);
+    for (const c of catalog.getStore()) {
+      rows.push([{ text: c.name, callback_data: catalog.encodeStorePath([c.id]) }]);
     }
     rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
   } else if (r.kind === 'cat') {
     body += `\n\n${escapeHtml(r.cat.name)}\nPick a <b>subcategory</b>:`;
-    for (const s of r.cat.subs) {
-      rows.push([{ text: s.name, callback_data: encodeStorePath([parts[0], s.id]) }]);
+    for (const s of r.cat.subs || []) {
+      rows.push([{ text: s.name, callback_data: catalog.encodeStorePath([parts[0], s.id]) }]);
     }
     rows.push([{ text: '🔙 Back', callback_data: 'browse' }]);
   } else if (r.kind === 'sub') {
     body += `\n\n${escapeHtml(r.sub.name)}\nPick a <b>section</b>:`;
-    for (const ss of r.sub.subs) {
-      rows.push([{ text: ss.name, callback_data: encodeStorePath([parts[0], parts[1], ss.id]) }]);
+    for (const ss of r.sub.subs || []) {
+      rows.push([{ text: ss.name, callback_data: catalog.encodeStorePath([parts[0], parts[1], ss.id]) }]);
     }
-    rows.push([{ text: '🔙 Back', callback_data: encodeStorePath([parts[0]]) }]);
+    rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath([parts[0]]) }]);
   } else if (r.kind === 'leaf') {
     const list = r.subsub.productIds
-      .map((id) => PRODUCTS.find((p) => p.id === id))
+      .map((id) => catalog.findProduct(id))
       .filter(Boolean);
     body += `\n\n${escapeHtml(r.subsub.name)}\nPick a <b>product</b>:`;
     for (const p of list) {
       rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
     }
-    rows.push([{ text: '🔙 Back', callback_data: encodeStorePath(r.parentPath) }]);
+    rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]);
   }
 
   return bot.sendMessage(chatId, body, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
@@ -438,7 +391,7 @@ function sendMyPurchases(chatId, userId) {
     });
   }
   const rows = user.purchases.map((pid) => {
-    const p = PRODUCTS.find((x) => x.id === pid);
+    const p = catalog.findProduct(pid);
     return [{ text: `📥 ${p ? p.name : pid}`, callback_data: `download_${pid}` }];
   });
   rows.push([{ text: '🔙 Main menu', callback_data: 'main_menu' }]);
@@ -563,13 +516,13 @@ bot.on('callback_query', async (query) => {
     return sendBrowseAt(chatId, []);
   }
   if (data.startsWith('st:')) {
-    return sendBrowseAt(chatId, decodeStorePath(data));
+    return sendBrowseAt(chatId, catalog.decodeStorePath(data));
   }
 
   // ── Product Detail ──
   if (data.startsWith('product_')) {
     const productId = data.replace('product_', '');
-    const product = PRODUCTS.find((p) => p.id === productId);
+    const product = catalog.findProduct(productId);
     if (!product) return;
 
     const user = getUser(userId);
@@ -596,7 +549,7 @@ bot.on('callback_query', async (query) => {
   // ── Buy Product ──
   if (data.startsWith('buy_')) {
     const productId = data.replace('buy_', '');
-    const product = PRODUCTS.find((p) => p.id === productId);
+    const product = catalog.findProduct(productId);
     if (!product) return;
 
     const user = getUser(userId);
@@ -627,7 +580,7 @@ bot.on('callback_query', async (query) => {
   // ── Download (re-deliver) ──
   if (data.startsWith('download_')) {
     const productId = data.replace('download_', '');
-    const product = PRODUCTS.find((p) => p.id === productId);
+    const product = catalog.findProduct(productId);
     if (!product) return;
     const user = getUser(userId);
     if (!user.purchases.includes(productId)) {
