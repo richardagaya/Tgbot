@@ -34,7 +34,7 @@ function pageHtml(formToken, { ok, err } = {}) {
   const options =
     leaves.length > 0
       ? leaves.map((l) => `<option value="${esc(l.path)}">${esc(l.label)}</option>`).join('\n')
-      : '<option value="">(Add a store tree in catalog.json first)</option>';
+      : '<option value="">(Define shop paths in catalog.json first)</option>';
   const rows = products
     .map(
       (p) =>
@@ -83,9 +83,9 @@ function pageHtml(formToken, { ok, err } = {}) {
     <textarea id="description" name="description" maxlength="2000" placeholder="Short description for the product page"></textarea>
     <label for="price">Price (USD)</label>
     <input id="price" name="price" type="number" step="0.01" min="0" required placeholder="9.99" />
-    <label for="leaf">Section in shop</label>
+    <label for="leaf">Add product under</label>
     <select id="leaf" name="leaf" ${leaves.length ? 'required' : ''}>${options}</select>
-    <p class="hint">To change categories or move items, edit <code>catalog.json</code> (structure: category → subcategory → section → product ids).</p>
+    <p class="hint">To rearrange the shop tree, edit <code>catalog.json</code>.</p>
     <button type="submit">Add product</button>
   </form>
   <h2 style="margin-top:2rem;font-size:1rem;">Current products (${products.length})</h2>

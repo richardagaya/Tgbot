@@ -324,30 +324,22 @@ function decrementSectionStock(pathKey, qty) {
 
 /** Reply keyboard under the chat (same actions as the welcome inline buttons). */
 const MENU = {
-  LOOKUP: '🔍 Lookup',
   SHOP: '🛒 Shop',
   BALANCE: '💰 Balance',
   DEPOSIT: '💳 Deposit',
-  REFERRAL: '🎁 Referral',
   MY_ORDERS: '📋 My Orders',
-  GET_API: '🔑 Get API',
   SUPPORT: '🆘 Support',
   HIDE: '✕ Hide keyboard',
 };
 
 function startWelcomeInlineKeyboard() {
-  const apiBtn = process.env.API_URL
-    ? [{ text: '🔑 Get API ↗', url: process.env.API_URL }]
-    : [{ text: '🔑 Get API', callback_data: 'get_api' }];
   const supportBtn = process.env.SUPPORT_URL
     ? [{ text: '🆘 Support ↗', url: process.env.SUPPORT_URL }]
     : [{ text: '🆘 Support', callback_data: 'support' }];
   return {
     inline_keyboard: [
-      [{ text: '🔍 Lookup', callback_data: 'lookup' }, { text: '🛒 Shop', callback_data: 'browse' }],
-      [{ text: '💰 Balance', callback_data: 'account' }, { text: '💳 Deposit', callback_data: 'deposit' }],
-      [{ text: '🎁 Referral', callback_data: 'referral' }, { text: '📋 My Orders', callback_data: 'my_purchases' }],
-      apiBtn,
+      [{ text: '🛒 Shop', callback_data: 'browse' }, { text: '💰 Balance', callback_data: 'account' }],
+      [{ text: '💳 Deposit', callback_data: 'deposit' }, { text: '📋 My Orders', callback_data: 'my_purchases' }],
       supportBtn,
     ],
   };
@@ -356,10 +348,8 @@ function startWelcomeInlineKeyboard() {
 function mainReplyKeyboard() {
   return {
     keyboard: [
-      [{ text: MENU.LOOKUP }, { text: MENU.SHOP }],
-      [{ text: MENU.BALANCE }, { text: MENU.DEPOSIT }],
-      [{ text: MENU.REFERRAL }, { text: MENU.MY_ORDERS }],
-      [{ text: MENU.GET_API }],
+      [{ text: MENU.SHOP }, { text: MENU.BALANCE }],
+      [{ text: MENU.DEPOSIT }, { text: MENU.MY_ORDERS }],
       [{ text: MENU.SUPPORT }],
       [{ text: MENU.HIDE }],
     ],
@@ -399,7 +389,7 @@ function sendLeafQtyIntro(chatId, parts, userId) {
   const pathKey = sectionPathFromParts(parts);
   const r = catalog.resolveStore(parts);
   if (!r || r.kind !== 'leaf') {
-    return bot.sendMessage(chatId, '⚠️ That section is not available.', {
+    return bot.sendMessage(chatId, '⚠️ That option is not available.', {
       reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
     });
   }
@@ -416,7 +406,7 @@ function sendLeafQtyIntro(chatId, parts, userId) {
       {
         parse_mode: 'HTML',
         reply_markup: {
-          inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+          inline_keyboard: [[{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]],
         },
       }
     );
@@ -430,14 +420,14 @@ function sendLeafQtyIntro(chatId, parts, userId) {
     for (const p of list) {
       rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
     }
-    rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]);
+    rows.push([{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]);
     return bot.sendMessage(chatId, body, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
   }
 
   const product = catalog.findProduct(ids[0]);
   if (!product) {
-    return bot.sendMessage(chatId, '⚠️ Product missing for this section.', {
-      reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]] },
+    return bot.sendMessage(chatId, '⚠️ Product missing for this listing.', {
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]] },
     });
   }
 
@@ -459,7 +449,7 @@ function sendLeafQtyIntro(chatId, parts, userId) {
     return bot.sendMessage(chatId, body, {
       parse_mode: 'HTML',
       reply_markup: {
-        inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+        inline_keyboard: [[{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]],
       },
     });
   }
@@ -477,7 +467,7 @@ function sendLeafQtyIntro(chatId, parts, userId) {
   return bot.sendMessage(chatId, body, {
     parse_mode: 'HTML',
     reply_markup: {
-      inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+      inline_keyboard: [[{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]],
     },
   });
 }
@@ -540,10 +530,61 @@ function sendBrowse(chatId, userId) {
   return sendBrowseAt(chatId, [], userId);
 }
 
+/** Skip redundant menus when there is only one branch at a level. */
+function expandAutoBrowseParts(parts) {
+  let p = parts.filter(Boolean);
+  for (let guard = 0; guard < 24; guard += 1) {
+    const r = catalog.resolveStore(p);
+    if (!r || r.kind === 'root' || r.kind === 'leaf') break;
+    if (r.kind === 'cat') {
+      const subs = r.cat.subs || [];
+      if (subs.length === 1) {
+        p = [p[0], subs[0].id];
+        continue;
+      }
+      break;
+    }
+    if (r.kind === 'sub') {
+      const leaves = r.sub.subs || [];
+      if (leaves.length === 1) {
+        p = [p[0], p[1], leaves[0].id];
+        continue;
+      }
+      break;
+    }
+    break;
+  }
+  return p;
+}
+
+/** Back from a leaf: skip tiers that had no real choice. */
+function shopBackCallbackFromLeaf(parts) {
+  const p = parts.filter(Boolean);
+  if (p.length !== 3) {
+    if (p.length <= 1) return 'browse';
+    return catalog.encodeStorePath(p.slice(0, -1));
+  }
+  const [catId, subId] = p;
+  const rSub = catalog.resolveStore([catId, subId]);
+  if (rSub?.kind === 'sub' && (rSub.sub.subs || []).length <= 1) {
+    const rCat = catalog.resolveStore([catId]);
+    if (rCat?.kind === 'cat' && (rCat.cat.subs || []).length <= 1) return 'browse';
+    return catalog.encodeStorePath([catId]);
+  }
+  return catalog.encodeStorePath([catId, subId]);
+}
+
 function sendBrowseAt(chatId, parts, userId) {
+  const normalized = parts.filter(Boolean);
+  const expanded = expandAutoBrowseParts(normalized);
+  if (expanded.join(':') !== normalized.join(':')) {
+    return sendBrowseAt(chatId, expanded, userId);
+  }
+  parts = expanded;
+
   const r = catalog.resolveStore(parts);
   if (!r) {
-    return bot.sendMessage(chatId, '⚠️ That section is not available. Open the shop again.', {
+    return bot.sendMessage(chatId, '⚠️ That shop path is not available. Open the shop again.', {
       reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
     });
   }
@@ -558,13 +599,13 @@ function sendBrowseAt(chatId, parts, userId) {
     }
     rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
   } else if (r.kind === 'cat') {
-    body += `\n\n${escapeHtml(r.cat.name)}\nPick a <b>subcategory</b>:`;
+    body += `\n\n${escapeHtml(r.cat.name)}\nPick an option:`;
     for (const s of r.cat.subs || []) {
       rows.push([{ text: s.name, callback_data: catalog.encodeStorePath([parts[0], s.id]) }]);
     }
     rows.push([{ text: '🔙 Back', callback_data: 'browse' }]);
   } else if (r.kind === 'sub') {
-    body += `\n\n${escapeHtml(r.sub.name)}\nPick a <b>section</b>:`;
+    body += `\n\n${escapeHtml(r.sub.name)}\nPick one:`;
     for (const ss of r.sub.subs || []) {
       rows.push([{ text: ss.name, callback_data: catalog.encodeStorePath([parts[0], parts[1], ss.id]) }]);
     }
@@ -577,11 +618,11 @@ function sendBrowseAt(chatId, parts, userId) {
     if (ids.length === 0) {
       return bot.sendMessage(
         chatId,
-        `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\nNo products in this section yet.`,
+        `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\nNo products here yet.`,
         {
           parse_mode: 'HTML',
           reply_markup: {
-            inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+            inline_keyboard: [[{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]],
           },
         }
       );
@@ -591,7 +632,7 @@ function sendBrowseAt(chatId, parts, userId) {
     for (const p of list) {
       rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
     }
-    rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]);
+    rows.push([{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]);
   }
 
   return bot.sendMessage(chatId, body, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
@@ -709,10 +750,6 @@ bot.on('message', async (msg) => {
 
   if (text.startsWith('/')) return;
 
-  if (text === MENU.LOOKUP) {
-    getUser(userId);
-    return bot.sendMessage(chatId, '🔍 <b>Lookup</b>\n\nThis feature is coming soon.', { parse_mode: 'HTML' });
-  }
   if (text === MENU.SHOP) {
     getUser(userId);
     return sendBrowse(chatId, userId);
@@ -728,24 +765,6 @@ bot.on('message', async (msg) => {
   if (text === MENU.MY_ORDERS) {
     getUser(userId);
     return sendMyPurchases(chatId, userId);
-  }
-  if (text === MENU.REFERRAL) {
-    getUser(userId);
-    const uname = (process.env.BOT_USERNAME || '').replace(/^@/, '');
-    const link = uname ? `https://t.me/${uname}?start=ref_${userId}` : '';
-    const body = link
-      ? `🎁 <b>Referral</b>\n\nShare your link:\n<code>${link}</code>`
-      : `🎁 <b>Referral</b>\n\nYour ID: <code>${userId}</code>\n\nSet BOT_USERNAME in your bot env for a t.me share link.`;
-    return bot.sendMessage(chatId, body, { parse_mode: 'HTML' });
-  }
-  if (text === MENU.GET_API) {
-    const url = process.env.API_URL;
-    if (url) return bot.sendMessage(chatId, `🔑 <b>API</b>\n\n${escapeHtml(url)}`, { parse_mode: 'HTML' });
-    return bot.sendMessage(
-      chatId,
-      '🔑 API details will be added here. Ask the admin or set API_URL in the server environment.',
-      { parse_mode: 'HTML' }
-    );
   }
   if (text === MENU.SUPPORT) {
     const url = process.env.SUPPORT_URL;
@@ -801,28 +820,6 @@ bot.on('callback_query', async (query) => {
 
   bot.answerCallbackQuery(query.id);
 
-  if (data === 'lookup') {
-    getUser(userId);
-    return bot.sendMessage(chatId, '🔍 <b>Lookup</b>\n\nThis feature is coming soon.', { parse_mode: 'HTML' });
-  }
-  if (data === 'referral') {
-    getUser(userId);
-    const uname = (process.env.BOT_USERNAME || '').replace(/^@/, '');
-    const link = uname ? `https://t.me/${uname}?start=ref_${userId}` : '';
-    const body = link
-      ? `🎁 <b>Referral</b>\n\nShare your link:\n<code>${link}</code>`
-      : `🎁 <b>Referral</b>\n\nYour ID: <code>${userId}</code>\n\nSet BOT_USERNAME in your bot env for a t.me share link.`;
-    return bot.sendMessage(chatId, body, { parse_mode: 'HTML' });
-  }
-  if (data === 'get_api') {
-    const url = process.env.API_URL;
-    if (url) return bot.sendMessage(chatId, `🔑 <b>API</b>\n\n${escapeHtml(url)}`, { parse_mode: 'HTML' });
-    return bot.sendMessage(
-      chatId,
-      '🔑 API details will be added here. Ask the admin or set API_URL in the server environment.',
-      { parse_mode: 'HTML' }
-    );
-  }
   if (data === 'support') {
     const url = process.env.SUPPORT_URL;
     if (url) return bot.sendMessage(chatId, `🆘 <b>Support</b>\n\n${escapeHtml(url)}`, { parse_mode: 'HTML' });

@@ -155,7 +155,7 @@ function appendProductToLeaf(store, catId, subId, subsubId, productId) {
   const cat = store.find((c) => c.id === catId);
   if (!cat) throw new Error('Category not found');
   const sub = (cat.subs || []).find((s) => s.id === subId);
-  if (!sub) throw new Error('Subcategory not found');
+  if (!sub) throw new Error('Store branch not found');
   const ss = (sub.subs || []).find((x) => x.id === subsubId);
   if (!ss) throw new Error('Section not found');
   if (!Array.isArray(ss.productIds)) ss.productIds = [];
@@ -163,7 +163,7 @@ function appendProductToLeaf(store, catId, subId, subsubId, productId) {
 }
 
 /**
- * Add a new product and attach it to a store leaf (category › sub › section).
+ * Add a new product and attach it to a store leaf (path: catId:midId:leafId in catalog.json).
  * @param {{ name: string, description: string, price: number|string, leaf: string }} opts leaf = "catId:subId:subsubId"
  */
 function addProduct(opts) {
@@ -172,7 +172,7 @@ function addProduct(opts) {
     .split(':')
     .map((s) => s.trim())
     .filter(Boolean);
-  if (parts.length !== 3) throw new Error('Pick a section (leaf path must be category:sub:section)');
+  if (parts.length !== 3) throw new Error('Leaf path must be category:mid:leaf (three ids)');
 
   const cat = loadCatalog();
   const id = nextProductId(cat.products);
