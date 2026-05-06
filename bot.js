@@ -103,7 +103,7 @@ function updateUser(userId, data) {
 /** Edit caption HTML on /start (shown under the banner image). */
 const WELCOME_MESSAGE_TEMPLATE = `Welcome to the <b>STIX MARKET</b>!`;
 
-const START_BANNER_PATH = path.join(__dirname, 'assets', 'start-banner.png');
+const START_BANNER_PATH = path.join(__dirname, 'assets', 'Market.png');
 
 // Products & shop layout live in catalog.json (see catalog.js). Admin UI: /admin/catalog
 
