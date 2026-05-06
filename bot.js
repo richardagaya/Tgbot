@@ -90,12 +90,10 @@ function updateUser(userId, data) {
   saveDB(db);
 }
 
-/** Edit welcome HTML for /start. Use {{name}} for the user's first name (already escaped). */
-const WELCOME_MESSAGE_TEMPLATE = `👋 <b>Welcome, {{name}}!</b>
+/** Edit caption HTML on /start (shown under the banner image). */
+const WELCOME_MESSAGE_TEMPLATE = `Welcome to the <b>REX LOOKUP SERVICE</b>!`;
 
-Use the <b>keyboard below</b> — Browse, Deposit, Account, Purchases — or the <b>☰</b> menu for commands.
-
-Add funds, pick a product from the shop, and download your files instantly.`;
+const START_BANNER_PATH = path.join(__dirname, 'assets', 'start-banner.png');
 
 // Products & shop layout live in catalog.json (see catalog.js). Admin UI: /admin/catalog
 
@@ -262,20 +260,45 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
-/** Bottom reply keyboard (Telegram “menu” under the message box) */
+/** Reply keyboard under the chat (same actions as the welcome inline buttons). */
 const MENU = {
-  BROWSE: '🛒 Browse',
-  DEPOSIT: '💰 Deposit',
-  ACCOUNT: '👤 Account',
-  PURCHASES: '📦 Purchases',
+  LOOKUP: '🔍 Lookup',
+  SHOP: '🛒 Shop',
+  BALANCE: '💰 Balance',
+  DEPOSIT: '💳 Deposit',
+  REFERRAL: '🎁 Referral',
+  MY_ORDERS: '📋 My Orders',
+  GET_API: '🔑 Get API',
+  SUPPORT: '🆘 Support',
   HIDE: '✕ Hide keyboard',
 };
+
+function startWelcomeInlineKeyboard() {
+  const apiBtn = process.env.API_URL
+    ? [{ text: '🔑 Get API ↗', url: process.env.API_URL }]
+    : [{ text: '🔑 Get API', callback_data: 'get_api' }];
+  const supportBtn = process.env.SUPPORT_URL
+    ? [{ text: '🆘 Support ↗', url: process.env.SUPPORT_URL }]
+    : [{ text: '🆘 Support', callback_data: 'support' }];
+  return {
+    inline_keyboard: [
+      [{ text: '🔍 Lookup', callback_data: 'lookup' }, { text: '🛒 Shop', callback_data: 'browse' }],
+      [{ text: '💰 Balance', callback_data: 'account' }, { text: '💳 Deposit', callback_data: 'deposit' }],
+      [{ text: '🎁 Referral', callback_data: 'referral' }, { text: '📋 My Orders', callback_data: 'my_purchases' }],
+      apiBtn,
+      supportBtn,
+    ],
+  };
+}
 
 function mainReplyKeyboard() {
   return {
     keyboard: [
-      [{ text: MENU.BROWSE }, { text: MENU.DEPOSIT }],
-      [{ text: MENU.ACCOUNT }, { text: MENU.PURCHASES }],
+      [{ text: MENU.LOOKUP }, { text: MENU.SHOP }],
+      [{ text: MENU.BALANCE }, { text: MENU.DEPOSIT }],
+      [{ text: MENU.REFERRAL }, { text: MENU.MY_ORDERS }],
+      [{ text: MENU.GET_API }],
+      [{ text: MENU.SUPPORT }],
       [{ text: MENU.HIDE }],
     ],
     resize_keyboard: true,
@@ -283,12 +306,31 @@ function mainReplyKeyboard() {
   };
 }
 
+async function sendWelcomeStart(chatId, userId) {
+  getUser(userId);
+  const caption = WELCOME_MESSAGE_TEMPLATE;
+  const markup = startWelcomeInlineKeyboard();
+  try {
+    if (fs.existsSync(START_BANNER_PATH)) {
+      await bot.sendPhoto(chatId, START_BANNER_PATH, {
+        caption,
+        parse_mode: 'HTML',
+        reply_markup: markup,
+      });
+      return;
+    }
+    console.warn('[start] Banner not found at', START_BANNER_PATH, '— sending text only.');
+  } catch (e) {
+    console.error('[start] sendPhoto:', e.message);
+  }
+  await bot.sendMessage(chatId, caption, { parse_mode: 'HTML', reply_markup: markup });
+}
+
 function sendMainMenu(chatId) {
-  return bot.sendMessage(
-    chatId,
-    `🏠 <b>Main menu</b>\n\nEverything runs from the <b>keyboard under the chat</b> — tap a row below.`,
-    { parse_mode: 'HTML', reply_markup: mainReplyKeyboard() }
-  );
+  return bot.sendMessage(chatId, `🏠 <b>Main menu</b>\n\nPick an option below.`, {
+    parse_mode: 'HTML',
+    reply_markup: mainReplyKeyboard(),
+  });
 }
 
 function sendBrowse(chatId) {
@@ -384,7 +426,7 @@ function sendMyPurchases(chatId, userId) {
     return bot.sendMessage(chatId, "📦 You haven't bought anything yet.", {
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🛒 Browse', callback_data: 'browse' }],
+          [{ text: '🛒 Shop', callback_data: 'browse' }],
           [{ text: '🔙 Main menu', callback_data: 'main_menu' }],
         ],
       },
@@ -415,12 +457,8 @@ function currencyKeyboard() {
 }
 
 // ─── /start ───────────────────────────────────────────────────────────────────
-bot.onText(/\/start/, (msg) => {
-  const userId = msg.from.id;
-  const name = escapeHtml(msg.from.first_name || 'there');
-  getUser(userId);
-  const text = WELCOME_MESSAGE_TEMPLATE.replace(/\{\{name\}\}/g, name);
-  bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML', reply_markup: mainReplyKeyboard() });
+bot.onText(/\/start/, async (msg) => {
+  await sendWelcomeStart(msg.chat.id, msg.from.id);
 });
 
 // ─── Slash shortcuts (also listed in Telegram’s ☰ command menu) ───────────────
@@ -454,13 +492,11 @@ bot.on('message', async (msg) => {
 
   if (text.startsWith('/')) return;
 
-  if (text === MENU.HIDE) {
-    return bot.sendMessage(chatId, 'Keyboard hidden. Send /start or /menu to open it again.', {
-      reply_markup: { remove_keyboard: true },
-    });
+  if (text === MENU.LOOKUP) {
+    getUser(userId);
+    return bot.sendMessage(chatId, '🔍 <b>Lookup</b>\n\nThis feature is coming soon.', { parse_mode: 'HTML' });
   }
-
-  if (text === MENU.BROWSE) {
+  if (text === MENU.SHOP) {
     getUser(userId);
     return sendBrowse(chatId);
   }
@@ -468,13 +504,46 @@ bot.on('message', async (msg) => {
     getUser(userId);
     return sendDepositIntro(chatId, userId);
   }
-  if (text === MENU.ACCOUNT) {
+  if (text === MENU.BALANCE) {
     getUser(userId);
     return sendAccount(chatId, userId);
   }
-  if (text === MENU.PURCHASES) {
+  if (text === MENU.MY_ORDERS) {
     getUser(userId);
     return sendMyPurchases(chatId, userId);
+  }
+  if (text === MENU.REFERRAL) {
+    getUser(userId);
+    const uname = (process.env.BOT_USERNAME || '').replace(/^@/, '');
+    const link = uname ? `https://t.me/${uname}?start=ref_${userId}` : '';
+    const body = link
+      ? `🎁 <b>Referral</b>\n\nShare your link:\n<code>${link}</code>`
+      : `🎁 <b>Referral</b>\n\nYour ID: <code>${userId}</code>\n\nSet BOT_USERNAME in your bot env for a t.me share link.`;
+    return bot.sendMessage(chatId, body, { parse_mode: 'HTML' });
+  }
+  if (text === MENU.GET_API) {
+    const url = process.env.API_URL;
+    if (url) return bot.sendMessage(chatId, `🔑 <b>API</b>\n\n${escapeHtml(url)}`, { parse_mode: 'HTML' });
+    return bot.sendMessage(
+      chatId,
+      '🔑 API details will be added here. Ask the admin or set API_URL in the server environment.',
+      { parse_mode: 'HTML' }
+    );
+  }
+  if (text === MENU.SUPPORT) {
+    const url = process.env.SUPPORT_URL;
+    if (url) return bot.sendMessage(chatId, `🆘 <b>Support</b>\n\n${escapeHtml(url)}`, { parse_mode: 'HTML' });
+    return bot.sendMessage(
+      chatId,
+      '🆘 Contact the admin for support, or set SUPPORT_URL in the bot environment.',
+      { parse_mode: 'HTML' }
+    );
+  }
+
+  if (text === MENU.HIDE) {
+    return bot.sendMessage(chatId, 'Keyboard hidden. Send /start or /menu to open it again.', {
+      reply_markup: { remove_keyboard: true },
+    });
   }
 
   const user = getUser(userId);
@@ -505,6 +574,38 @@ bot.on('callback_query', async (query) => {
   const data = query.data;
 
   bot.answerCallbackQuery(query.id);
+
+  if (data === 'lookup') {
+    getUser(userId);
+    return bot.sendMessage(chatId, '🔍 <b>Lookup</b>\n\nThis feature is coming soon.', { parse_mode: 'HTML' });
+  }
+  if (data === 'referral') {
+    getUser(userId);
+    const uname = (process.env.BOT_USERNAME || '').replace(/^@/, '');
+    const link = uname ? `https://t.me/${uname}?start=ref_${userId}` : '';
+    const body = link
+      ? `🎁 <b>Referral</b>\n\nShare your link:\n<code>${link}</code>`
+      : `🎁 <b>Referral</b>\n\nYour ID: <code>${userId}</code>\n\nSet BOT_USERNAME in your bot env for a t.me share link.`;
+    return bot.sendMessage(chatId, body, { parse_mode: 'HTML' });
+  }
+  if (data === 'get_api') {
+    const url = process.env.API_URL;
+    if (url) return bot.sendMessage(chatId, `🔑 <b>API</b>\n\n${escapeHtml(url)}`, { parse_mode: 'HTML' });
+    return bot.sendMessage(
+      chatId,
+      '🔑 API details will be added here. Ask the admin or set API_URL in the server environment.',
+      { parse_mode: 'HTML' }
+    );
+  }
+  if (data === 'support') {
+    const url = process.env.SUPPORT_URL;
+    if (url) return bot.sendMessage(chatId, `🆘 <b>Support</b>\n\n${escapeHtml(url)}`, { parse_mode: 'HTML' });
+    return bot.sendMessage(
+      chatId,
+      '🆘 Contact the admin for support, or set SUPPORT_URL in the bot environment.',
+      { parse_mode: 'HTML' }
+    );
+  }
 
   // ── Main Menu ──
   if (data === 'main_menu') {
@@ -790,12 +891,12 @@ bot
 
 bot
   .setMyCommands([
-    { command: 'start', description: 'Welcome & open keyboard' },
+    { command: 'start', description: 'Welcome with menu' },
     { command: 'menu', description: 'Main menu' },
-    { command: 'browse', description: 'Browse products' },
+    { command: 'browse', description: 'Open shop' },
     { command: 'deposit', description: 'Deposit crypto to your balance' },
     { command: 'account', description: 'Balance & user ID' },
-    { command: 'purchases', description: 'Your files' },
+    { command: 'purchases', description: 'Your files / orders' },
   ])
   .then(() => console.log('✅ Bot command menu (/) registered'))
   .catch((err) => console.error('[setMyCommands]', err.message));
