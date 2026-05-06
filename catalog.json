@@ -2,19 +2,21 @@
   "products": [
     {
       "id": "p1",
-      "name": "📘 Airbnb Revenue Playbook",
-      "description": "Step-by-step guide to maximize your short-term rental income.",
+      "name": "W2 forms",
+      "description": "File your tax refunds using these W2 forms.",
       "price": 5,
       "fileId": null,
       "filePath": null
     },
     {
       "id": "p2",
-      "name": "📊 Host Finance Spreadsheet",
-      "description": "Complete P&L, expense tracker & tax-ready template.",
+      "name": "DL PSD template",
+      "description": "Editable PSD layout pack for driver license–style documents.",
       "price": 8,
       "fileId": null,
-      "filePath": null
+      "filePath": null,
+      "deliveryFolder": "deliverables/p2",
+      "deliveryZipPath": null
     },
     {
       "id": "p3",
@@ -27,21 +29,70 @@
   ],
   "store": [
     {
-      "id": "rental",
-      "name": "🏠 Short-term rentals",
+      "id": "w2",
+      "name": "📄 W2 forms",
       "subs": [
         {
-          "id": "edu",
-          "name": "📚 Guides & playbooks",
+          "id": "shop",
+          "name": "Shop",
           "subs": [
-            { "id": "rev", "name": "💵 Revenue & pricing", "productIds": ["p1"] },
-            { "id": "list", "name": "🚀 Listings & growth", "productIds": ["p3"] }
+            { "id": "items", "name": "W2 forms", "productIds": ["p1"] }
           ]
-        },
+        }
+      ]
+    },
+    {
+      "id": "docs",
+      "name": "📑 Documents",
+      "subs": [
         {
-          "id": "fin",
-          "name": "💼 Finance & operations",
-          "subs": [{ "id": "sheets", "name": "📊 Spreadsheets & templates", "productIds": ["p2"] }]
+          "id": "types",
+          "name": "Documents",
+          "subs": [
+            {
+              "id": "dl_psd",
+              "name": "DL Psd",
+              "description": "Professional PSD templates you can customize. Files are delivered digitally after purchase.",
+              "quantityAvailable": 50,
+              "productIds": ["p2"]
+            },
+            { "id": "utility", "name": "Utility bills", "productIds": [] },
+            { "id": "resume", "name": "Resume", "productIds": [] },
+            { "id": "answers", "name": "Assessment answers", "productIds": [] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "logins",
+      "name": "🔐 Logins",
+      "subs": [
+        {
+          "id": "accounts",
+          "name": "Logins",
+          "subs": [
+            { "id": "fb_usa", "name": "Fb usa", "productIds": [] },
+            { "id": "tt_usa", "name": "TT usa", "productIds": [] },
+            { "id": "edu_mails", "name": "Edu mails", "productIds": [] },
+            { "id": "netflix", "name": "Netflix", "productIds": [] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fullz",
+      "name": "FULLZ",
+      "subs": [
+        {
+          "id": "fullz_types",
+          "name": "FULLZ",
+          "subs": [
+            { "id": "young", "name": "young fullz (2005-2009)", "productIds": [] },
+            { "id": "w_cs", "name": "Fullz W CS", "productIds": [] },
+            { "id": "fafsa", "name": "Fafsa fullz", "productIds": [] },
+            { "id": "old", "name": "old fullz", "productIds": [] },
+            { "id": "new", "name": "new fullz", "productIds": [] }
+          ]
         }
       ]
     }

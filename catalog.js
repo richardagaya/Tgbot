@@ -85,6 +85,10 @@ function normalizeProduct(p) {
     price: Number.isFinite(price) ? Math.round(price * 100) / 100 : 0,
     fileId: p.fileId == null || p.fileId === '' ? null : String(p.fileId),
     filePath: p.filePath == null || p.filePath === '' ? null : String(p.filePath),
+    /** Folder on disk (relative to project or absolute) — zipped and sent on purchase. */
+    deliveryFolder: p.deliveryFolder == null || p.deliveryFolder === '' ? null : String(p.deliveryFolder),
+    /** Pre-built zip file path (optional; sent as-is if set and file exists). */
+    deliveryZipPath: p.deliveryZipPath == null || p.deliveryZipPath === '' ? null : String(p.deliveryZipPath),
   };
 }
 
@@ -199,9 +203,16 @@ function resolveStore(parts) {
   const sub = (cat.subs || []).find((s) => s.id === parts[1]);
   if (!sub) return null;
   if (parts.length === 2) return { kind: 'sub', cat, sub };
-  const subsub = (sub.subs || []).find((x) => x.id === parts[2]);
-  if (!subsub || !Array.isArray(subsub.productIds)) return null;
-  return { kind: 'leaf', cat, sub, subsub, parentPath: [parts[0], parts[1]] };
+  const subsubRaw = (sub.subs || []).find((x) => x.id === parts[2]);
+  if (!subsubRaw) return null;
+  const productIds = Array.isArray(subsubRaw.productIds) ? subsubRaw.productIds : [];
+  return {
+    kind: 'leaf',
+    cat,
+    sub,
+    subsub: { ...subsubRaw, productIds },
+    parentPath: [parts[0], parts[1]],
+  };
 }
 
 module.exports = {

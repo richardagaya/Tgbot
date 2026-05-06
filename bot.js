@@ -2,6 +2,8 @@ require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const archiver = require('archiver');
 const https = require('https');
 const http = require('http');
 const catalog = require('./catalog');
@@ -67,6 +69,7 @@ function loadDB() {
   }
   const db = JSON.parse(fs.readFileSync(DB_PATH));
   if (!db.pendingPayments) db.pendingPayments = [];
+  if (!db.sectionStock) db.sectionStock = {};
   return db;
 }
 
@@ -77,10 +80,17 @@ function saveDB(db) {
 function getUser(userId) {
   const db = loadDB();
   if (!db.users[userId]) {
-    db.users[userId] = { balance: 0, purchases: [], state: null };
+    db.users[userId] = {
+      balance: 0,
+      purchases: [],
+      state: null,
+      qtyLeafPath: null,
+      pendingSectionPurchase: null,
+    };
     saveDB(db);
   }
   if (db.users[userId].state === undefined) db.users[userId].state = null;
+  if (!Array.isArray(db.users[userId].purchases)) db.users[userId].purchases = [];
   return db.users[userId];
 }
 
@@ -91,7 +101,7 @@ function updateUser(userId, data) {
 }
 
 /** Edit caption HTML on /start (shown under the banner image). */
-const WELCOME_MESSAGE_TEMPLATE = `Welcome to the <b>REX LOOKUP SERVICE</b>!`;
+const WELCOME_MESSAGE_TEMPLATE = `Welcome to the <b>STIX MARKET</b>!`;
 
 const START_BANNER_PATH = path.join(__dirname, 'assets', 'start-banner.png');
 
@@ -260,6 +270,58 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
+/** Stable key for a store leaf: catId:subId:leafId */
+function sectionPathFromParts(parts) {
+  return parts.filter(Boolean).join(':');
+}
+
+function getLeafFromPathKey(pathKey) {
+  const parts = String(pathKey || '')
+    .split(':')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length !== 3) return null;
+  const r = catalog.resolveStore(parts);
+  if (!r || r.kind !== 'leaf') return null;
+  return { parts, r };
+}
+
+/** Current units available for this section (null = unlimited). Synced in db.sectionStock. */
+function getSectionStock(pathKey) {
+  const db = loadDB();
+  if (!db.sectionStock) db.sectionStock = {};
+  if (Object.prototype.hasOwnProperty.call(db.sectionStock, pathKey)) {
+    const v = db.sectionStock[pathKey];
+    return v === null ? null : v;
+  }
+  const hit = getLeafFromPathKey(pathKey);
+  if (!hit) return 0;
+  const qa = hit.r.subsub.quantityAvailable;
+  if (qa === undefined || qa === null) {
+    return null;
+  }
+  const n = Math.max(0, Math.floor(Number(qa)));
+  db.sectionStock[pathKey] = n;
+  saveDB(db);
+  return n;
+}
+
+function setSectionStock(pathKey, value) {
+  const db = loadDB();
+  if (!db.sectionStock) db.sectionStock = {};
+  db.sectionStock[pathKey] = value;
+  saveDB(db);
+}
+
+/** Returns false if not enough stock (only when stock is capped). */
+function decrementSectionStock(pathKey, qty) {
+  const cur = getSectionStock(pathKey);
+  if (cur === null) return true;
+  if (cur < qty) return false;
+  setSectionStock(pathKey, cur - qty);
+  return true;
+}
+
 /** Reply keyboard under the chat (same actions as the welcome inline buttons). */
 const MENU = {
   LOOKUP: '🔍 Lookup',
@@ -333,11 +395,152 @@ function sendMainMenu(chatId) {
   });
 }
 
-function sendBrowse(chatId) {
-  return sendBrowseAt(chatId, []);
+function sendLeafQtyIntro(chatId, parts, userId) {
+  const pathKey = sectionPathFromParts(parts);
+  const r = catalog.resolveStore(parts);
+  if (!r || r.kind !== 'leaf') {
+    return bot.sendMessage(chatId, '⚠️ That section is not available.', {
+      reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
+    });
+  }
+  const ids = r.subsub.productIds || [];
+
+  if (ids.length === 0) {
+    const desc = (r.subsub.description && String(r.subsub.description).trim()) || 'No description yet.';
+    const stock = getSectionStock(pathKey);
+    const stockLine =
+      stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
+    return bot.sendMessage(
+      chatId,
+      `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}\n\n⚠️ No product linked — add one in <code>catalog.json</code> or the admin page.`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+        },
+      }
+    );
+  }
+
+  if (ids.length > 1) {
+    const rows = [];
+    let body = '📂 <b>Shop</b>';
+    body += `\n\n${escapeHtml(r.subsub.name)}\nPick a <b>product</b>:`;
+    const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
+    for (const p of list) {
+      rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
+    }
+    rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]);
+    return bot.sendMessage(chatId, body, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
+  }
+
+  const product = catalog.findProduct(ids[0]);
+  if (!product) {
+    return bot.sendMessage(chatId, '⚠️ Product missing for this section.', {
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]] },
+    });
+  }
+
+  const stock = getSectionStock(pathKey);
+  const desc =
+    (r.subsub.description && String(r.subsub.description).trim()) ||
+    product.description ||
+    'No description yet.';
+  const stockLine =
+    stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
+
+  let body = `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}\n💵 <b>Price each:</b> ${formatBalance(
+    product.price
+  )}\n\n`;
+
+  if (stock !== null && stock <= 0) {
+    body += '❌ Sold out for now.';
+    updateUser(userId, { state: null, qtyLeafPath: null });
+    return bot.sendMessage(chatId, body, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+      },
+    });
+  }
+
+  body +=
+    '✏️ <b>How many do you want?</b>\nReply with a whole number' +
+    (stock === null ? '.' : ` (1–${stock}).`);
+
+  updateUser(userId, {
+    state: 'awaiting_section_qty',
+    qtyLeafPath: pathKey,
+    pendingSectionPurchase: null,
+  });
+
+  return bot.sendMessage(chatId, body, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+    },
+  });
 }
 
-function sendBrowseAt(chatId, parts) {
+function handleSectionQtyMessage(chatId, userId, text, user) {
+  const pathKey = user.qtyLeafPath;
+  const qty = parseInt(String(text).replace(/[^0-9]/g, ''), 10);
+  const stock = getSectionStock(pathKey);
+  const parts = pathKey.split(':').filter(Boolean);
+  const r = catalog.resolveStore(parts);
+  if (!r || r.kind !== 'leaf') {
+    updateUser(userId, { state: null, qtyLeafPath: null });
+    return bot.sendMessage(chatId, '⚠️ Session expired. Open the shop again.');
+  }
+  const leaf = r.subsub;
+  const productId = (leaf.productIds || [])[0];
+  const product = catalog.findProduct(productId);
+  if (!product) {
+    updateUser(userId, { state: null, qtyLeafPath: null });
+    return bot.sendMessage(chatId, '⚠️ Product not found.');
+  }
+  if (!Number.isFinite(qty) || qty < 1) {
+    return bot.sendMessage(chatId, '⚠️ Enter a whole number of at least 1.');
+  }
+  if (stock !== null && qty > stock) {
+    return bot.sendMessage(chatId, `⚠️ Only ${stock} available. Try a smaller quantity.`);
+  }
+
+  const total = parseFloat((product.price * qty).toFixed(2));
+  const u = getUser(userId);
+  updateUser(userId, {
+    state: 'awaiting_section_confirm',
+    qtyLeafPath: null,
+    pendingSectionPurchase: { pathKey, qty, productId },
+  });
+
+  const okBal = u.balance >= total;
+  const balLine = okBal
+    ? '✅ Your balance covers this order.'
+    : `❌ You need ${formatBalance(total)} but have ${formatBalance(u.balance)}.`;
+
+  return bot.sendMessage(
+    chatId,
+    `📋 <b>Confirm order</b>\n\n<b>${escapeHtml(product.name)}</b>\nQty: <b>${qty}</b>\nEach: ${formatBalance(
+      product.price
+    )}\n<b>Total: ${formatBalance(total)}</b>\n\n💰 Balance: ${formatBalance(u.balance)}\n${balLine}`,
+    {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '✅ Confirm purchase', callback_data: 'section_confirm_buy' }],
+          [{ text: '🔙 Change quantity', callback_data: 'section_confirm_editqty' }],
+        ],
+      },
+    }
+  );
+}
+
+function sendBrowse(chatId, userId) {
+  return sendBrowseAt(chatId, [], userId);
+}
+
+function sendBrowseAt(chatId, parts, userId) {
   const r = catalog.resolveStore(parts);
   if (!r) {
     return bot.sendMessage(chatId, '⚠️ That section is not available. Open the shop again.', {
@@ -367,9 +570,23 @@ function sendBrowseAt(chatId, parts) {
     }
     rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath([parts[0]]) }]);
   } else if (r.kind === 'leaf') {
-    const list = r.subsub.productIds
-      .map((id) => catalog.findProduct(id))
-      .filter(Boolean);
+    const ids = r.subsub.productIds || [];
+    if (userId != null && (ids.length === 0 || ids.length === 1)) {
+      return sendLeafQtyIntro(chatId, parts, userId);
+    }
+    if (ids.length === 0) {
+      return bot.sendMessage(
+        chatId,
+        `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\nNo products in this section yet.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath(r.parentPath) }]],
+          },
+        }
+      );
+    }
+    const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
     body += `\n\n${escapeHtml(r.subsub.name)}\nPick a <b>product</b>:`;
     for (const p of list) {
       rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
@@ -381,7 +598,7 @@ function sendBrowseAt(chatId, parts) {
 }
 
 function sendDepositIntro(chatId, userId) {
-  updateUser(userId, { state: null });
+  updateUser(userId, { state: null, qtyLeafPath: null, pendingSectionPurchase: null });
   return bot.sendMessage(
     chatId,
     `💰 <b>Deposit</b>\n\nTop up in crypto — your balance updates automatically once the network confirms.\n\nMinimum: <b>$${MIN_DEPOSIT}</b> USD\n\nHow much do you want to deposit?`,
@@ -468,7 +685,7 @@ bot.onText(/^\/menu$/i, (msg) => {
 });
 bot.onText(/^\/browse$/i, (msg) => {
   getUser(msg.from.id);
-  sendBrowse(msg.chat.id);
+  sendBrowse(msg.chat.id, msg.from.id);
 });
 bot.onText(/^\/deposit$/i, (msg) => {
   getUser(msg.from.id);
@@ -498,7 +715,7 @@ bot.on('message', async (msg) => {
   }
   if (text === MENU.SHOP) {
     getUser(userId);
-    return sendBrowse(chatId);
+    return sendBrowse(chatId, userId);
   }
   if (text === MENU.DEPOSIT) {
     getUser(userId);
@@ -547,6 +764,15 @@ bot.on('message', async (msg) => {
   }
 
   const user = getUser(userId);
+
+  if (user.state === 'awaiting_section_qty' && user.qtyLeafPath) {
+    return handleSectionQtyMessage(chatId, userId, text, user);
+  }
+  if (user.state === 'awaiting_section_confirm') {
+    return bot.sendMessage(chatId, 'Use ✅ Confirm or 🔙 Change quantity above.', {
+      reply_markup: mainReplyKeyboard(),
+    });
+  }
 
   if (!user.state || user.state !== 'awaiting_deposit_amount') return;
 
@@ -614,10 +840,67 @@ bot.on('callback_query', async (query) => {
 
   // ── Browse shop (categories → sub → sub-sub → products) ──
   if (data === 'browse') {
-    return sendBrowseAt(chatId, []);
+    return sendBrowseAt(chatId, [], userId);
   }
   if (data.startsWith('st:')) {
-    return sendBrowseAt(chatId, catalog.decodeStorePath(data));
+    return sendBrowseAt(chatId, catalog.decodeStorePath(data), userId);
+  }
+
+  if (data === 'section_confirm_editqty') {
+    const u = getUser(userId);
+    const p = u.pendingSectionPurchase;
+    updateUser(userId, { state: null, pendingSectionPurchase: null, qtyLeafPath: null });
+    if (!p || !p.pathKey) {
+      return bot.sendMessage(chatId, '⚠️ Session expired.');
+    }
+    const parts = p.pathKey.split(':').filter(Boolean);
+    return sendLeafQtyIntro(chatId, parts, userId);
+  }
+
+  if (data === 'section_confirm_buy') {
+    const u = getUser(userId);
+    const pend = u.pendingSectionPurchase;
+    if (!pend || !pend.pathKey || !pend.productId || !pend.qty) {
+      return bot.sendMessage(chatId, '⚠️ Nothing to confirm. Open the shop again.');
+    }
+    const product = catalog.findProduct(pend.productId);
+    if (!product) return bot.sendMessage(chatId, '⚠️ Product missing.');
+    const total = parseFloat((product.price * pend.qty).toFixed(2));
+    if (u.balance < total) {
+      return bot.sendMessage(chatId, `❌ You need ${formatBalance(total)}. Deposit first.`, {
+        reply_markup: { inline_keyboard: [[{ text: '💰 Deposit', callback_data: 'deposit' }]] },
+      });
+    }
+    if (!decrementSectionStock(pend.pathKey, pend.qty)) {
+      return bot.sendMessage(chatId, '❌ Not enough stock. Try a lower quantity.', {
+        reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
+      });
+    }
+    const newBal = parseFloat((u.balance - total).toFixed(2));
+    const purch = [...(u.purchases || [])];
+    for (let i = 0; i < pend.qty; i += 1) purch.push(pend.productId);
+    updateUser(userId, {
+      balance: newBal,
+      purchases: purch,
+      state: null,
+      qtyLeafPath: null,
+      pendingSectionPurchase: null,
+    });
+    const db = loadDB();
+    db.orders.push({
+      userId,
+      productId: pend.productId,
+      price: total,
+      qty: pend.qty,
+      date: new Date().toISOString(),
+    });
+    saveDB(db);
+    await bot.sendMessage(
+      chatId,
+      `🎉 *Purchase successful!*\n\n${product.name} × ${pend.qty}\nTotal: *${formatBalance(total)}*\n\nDelivering your file…`,
+      { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
+    );
+    return await deliverFile(chatId, product);
   }
 
   // ── Product Detail ──
@@ -675,7 +958,7 @@ bot.on('callback_query', async (query) => {
     saveDB(db);
 
     await bot.sendMessage(chatId, `🎉 *Purchase successful!*\n\n${product.name}\n\nDelivering your file now...`, { parse_mode: 'Markdown' });
-    return deliverFile(chatId, product);
+    return await deliverFile(chatId, product);
   }
 
   // ── Download (re-deliver) ──
@@ -687,7 +970,7 @@ bot.on('callback_query', async (query) => {
     if (!user.purchases.includes(productId)) {
       return bot.sendMessage(chatId, '❌ You do not own this file.');
     }
-    return deliverFile(chatId, product);
+    return await deliverFile(chatId, product);
   }
 
   // ── Deposit: Show amount selection ──
@@ -810,24 +1093,119 @@ bot.on('callback_query', async (query) => {
 });
 
 // ─── File Delivery ────────────────────────────────────────────────────────────
+
+/** Paths in catalog.json can be relative to this project folder or absolute. */
+function resolveProductFsPath(relOrAbs) {
+  if (!relOrAbs) return null;
+  const s = String(relOrAbs).trim();
+  if (!s) return null;
+  if (path.isAbsolute(s)) return s;
+  return path.join(__dirname, s);
+}
+
+function safeZipFilename(name) {
+  const base = String(name || 'download').replace(/[^\w\- ().]/g, '_').slice(0, 80);
+  return base.toLowerCase().endsWith('.zip') ? base : `${base}.zip`;
+}
+
+function zipFolderToTempZip(absFolder, productId) {
+  return new Promise((resolve, reject) => {
+    const tmp = path.join(os.tmpdir(), `tg-deliver-${productId}-${Date.now()}.zip`);
+    const output = fs.createWriteStream(tmp);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const onErr = (e) => reject(e);
+    output.on('error', onErr);
+    output.on('close', () => resolve(tmp));
+    archive.on('error', onErr);
+    archive.on('warning', (err) => {
+      if (err.code === 'ENOENT') console.warn('[archiver]', err.message);
+    });
+    archive.pipe(output);
+    archive.directory(absFolder, false);
+    archive.finalize();
+  });
+}
+
 async function deliverFile(chatId, product) {
-  if (product.fileId) {
-    return bot.sendDocument(chatId, product.fileId, {
-      caption: `📥 *${product.name}*\n\nThank you for your purchase!`,
-      parse_mode: 'Markdown',
-    });
+  const captionZip = `📥 *${product.name}*\n\nThank you for your purchase — your files are in the ZIP below.`;
+  const captionFile = `📥 *${product.name}*\n\nThank you for your purchase!`;
+  let tempZip = null;
+  try {
+    const deliveryZip = resolveProductFsPath(product.deliveryZipPath);
+    if (deliveryZip && fs.existsSync(deliveryZip)) {
+      const st = fs.statSync(deliveryZip);
+      if (st.isFile()) {
+        return bot.sendDocument(chatId, fs.createReadStream(deliveryZip), {
+          caption: captionZip,
+          parse_mode: 'Markdown',
+        }, {
+          filename: safeZipFilename(path.basename(deliveryZip)),
+          contentType: 'application/zip',
+        });
+      }
+    }
+
+    const folder = resolveProductFsPath(product.deliveryFolder);
+    if (folder && fs.existsSync(folder)) {
+      const st = fs.statSync(folder);
+      if (st.isDirectory()) {
+        const names = fs.readdirSync(folder);
+        if (!names.length) {
+          return bot.sendMessage(
+            chatId,
+            `📥 *${product.name}*\n\n⚠️ The delivery folder is empty. Add files to:\n\`${folder}\``,
+            { parse_mode: 'Markdown' }
+          );
+        }
+        tempZip = await zipFolderToTempZip(folder, product.id);
+        return bot.sendDocument(chatId, fs.createReadStream(tempZip), {
+          caption: captionZip,
+          parse_mode: 'Markdown',
+        }, {
+          filename: safeZipFilename(product.name),
+          contentType: 'application/zip',
+        });
+      }
+    }
+
+    if (product.fileId) {
+      return bot.sendDocument(chatId, product.fileId, {
+        caption: captionFile,
+        parse_mode: 'Markdown',
+      });
+    }
+
+    const fp = resolveProductFsPath(product.filePath);
+    if (fp && fs.existsSync(fp)) {
+      const isZip = fp.toLowerCase().endsWith('.zip');
+      return bot.sendDocument(chatId, fs.createReadStream(fp), {
+        caption: isZip ? captionZip : captionFile,
+        parse_mode: 'Markdown',
+      }, {
+        filename: path.basename(fp),
+        contentType: isZip ? 'application/zip' : 'application/octet-stream',
+      });
+    }
+
+    return bot.sendMessage(
+      chatId,
+      `📥 *${product.name}*\n\n⚠️ Nothing to send yet. In \`catalog.json\` set one of:\n• \`deliveryFolder\` — folder of files (sent as a ZIP)\n• \`deliveryZipPath\` — ready-made .zip file\n• \`filePath\` — single file\n\nYour purchase is still recorded ✅`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (e) {
+    console.error('[deliverFile]', e.message);
+    return bot.sendMessage(
+      chatId,
+      `📥 *${product.name}*\n\n⚠️ Could not prepare the download: ${e.message}`,
+      { parse_mode: 'Markdown' }
+    );
+  } finally {
+    if (tempZip && fs.existsSync(tempZip)) {
+      try {
+        fs.unlinkSync(tempZip);
+      } catch (_) {}
+    }
   }
-  if (product.filePath && fs.existsSync(product.filePath)) {
-    return bot.sendDocument(chatId, fs.createReadStream(product.filePath), {}, {
-      filename: path.basename(product.filePath),
-      contentType: 'application/octet-stream',
-    });
-  }
-  return bot.sendMessage(
-    chatId,
-    `📥 *${product.name}*\n\n⚠️ File delivery is being set up by the admin. You will receive it shortly.\n\nYour purchase is recorded ✅`,
-    { parse_mode: 'Markdown' }
-  );
 }
 
 // ─── Admin Commands ───────────────────────────────────────────────────────────
