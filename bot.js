@@ -52,8 +52,21 @@ if (HTTP_PORT) {
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
 
+let last409HintAt = 0;
 bot.on('polling_error', (err) => {
-  console.error('[polling_error]', err.code || '', err.message);
+  const msg = String(err?.message || err);
+  const code = err?.code;
+  console.error('[polling_error]', code || '', msg);
+  if (code === 'ETELEGRAM' && /409|Conflict|getUpdates/i.test(msg)) {
+    const now = Date.now();
+    if (now - last409HintAt > 25_000) {
+      last409HintAt = now;
+      console.error(
+        '[telegram] 409: another process is polling this same BOT_TOKEN (e.g. Railway/Render + local). ' +
+          'Stop the cloud deployment or use a second test bot from @BotFather for npm run dev.'
+      );
+    }
+  }
 });
 
 bot.on('error', (err) => {
@@ -110,6 +123,22 @@ const START_BANNER_PATH = path.join(__dirname, 'assets', 'Market.png');
 const MIN_DEPOSIT = 10; // USD — minimum deposit amount in the bot
 
 // ─── NOWPayments API ──────────────────────────────────────────────────────────
+// Production: https://api.nowpayments.io/v1 — Sandbox: https://api-sandbox.nowpayments.io/v1
+// Create a sandbox account at https://account.sandbox.nowpayments.io and generate a sandbox API key.
+function resolveNowPaymentsHost() {
+  const explicit = process.env.NOWPAYMENTS_API_HOST;
+  if (explicit && explicit.trim()) return explicit.trim();
+  const sb = process.env.NOWPAYMENTS_SANDBOX;
+  if (sb === '1' || sb === 'true' || sb === 'yes') return 'api-sandbox.nowpayments.io';
+  return 'api.nowpayments.io';
+}
+const NOWPAYMENTS_API_HOST = resolveNowPaymentsHost();
+
+/** Sandbox API simulates flows; real crypto is not required when `case` is set (see createNowPayment). */
+function isNowPaymentsSandbox() {
+  return NOWPAYMENTS_API_HOST.includes('sandbox');
+}
+
 const DEPOSIT_CURRENCIES = [
   { label: 'USDT (TRC20)', value: 'usdttrc20' },
   { label: 'USDT (ERC20)', value: 'usdterc20' },
@@ -125,7 +154,7 @@ function nowPaymentsRequest(method, endpoint, body = null) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
     const options = {
-      hostname: 'api.nowpayments.io',
+      hostname: NOWPAYMENTS_API_HOST,
       path: `/v1${endpoint}`,
       method,
       headers: {
@@ -154,7 +183,7 @@ function nowPaymentsRequest(method, endpoint, body = null) {
 }
 
 async function createNowPayment(userId, usdAmount, currency) {
-  return nowPaymentsRequest('POST', '/payment', {
+  const body = {
     price_amount: usdAmount,
     price_currency: 'usd',
     pay_currency: currency,
@@ -162,7 +191,13 @@ async function createNowPayment(userId, usdAmount, currency) {
     order_description: `Balance deposit for user ${userId}`,
     is_fixed_rate: false,
     is_fee_paid_by_user: true,
-  });
+  };
+  // Sandbox only: simulates payment outcome without sending crypto (Postman: "case" on POST /payment).
+  if (isNowPaymentsSandbox()) {
+    const c = process.env.NOWPAYMENTS_SANDBOX_CASE;
+    body.case = c && String(c).trim() ? String(c).trim() : 'success';
+  }
+  return nowPaymentsRequest('POST', '/payment', body);
 }
 
 async function assertDepositMeetsNowPaymentsMinimum(usdAmount, payCurrency) {
@@ -212,7 +247,10 @@ async function checkPendingPayments() {
   for (const p of active) {
     try {
       const result = await getNowPaymentStatus(p.paymentId);
-      const newStatus = result.payment_status;
+      const newStatus =
+        result && typeof result === 'object'
+          ? result.payment_status || (result.payment && result.payment.payment_status)
+          : null;
       if (!newStatus || newStatus === p.status) continue;
 
       p.status = newStatus;
@@ -256,7 +294,8 @@ async function checkPendingPayments() {
   }
 }
 
-setInterval(checkPendingPayments, 60 * 1000);
+const PAYMENT_POLL_MS = isNowPaymentsSandbox() ? 15 * 1000 : 60 * 1000;
+setInterval(checkPendingPayments, PAYMENT_POLL_MS);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatBalance(amount) {
@@ -1080,7 +1119,17 @@ bot.on('callback_query', async (query) => {
       });
       saveDB(db);
 
+      if (isNowPaymentsSandbox()) {
+        setImmediate(() => {
+          checkPendingPayments().catch((e) => console.error('[poll]', e.message));
+        });
+      }
+
       const currencyLabel = DEPOSIT_CURRENCIES.find((c) => c.value === currency)?.label || currency.toUpperCase();
+
+      const sandboxNote = isNowPaymentsSandbox()
+        ? `\n🧪 *Sandbox:* no real transfer needed — status simulates as *\`${process.env.NOWPAYMENTS_SANDBOX_CASE || 'success'}\`*; balance should update within ~${Math.ceil(PAYMENT_POLL_MS / 1000)}s.\n`
+        : '';
 
       return bot.sendMessage(
         chatId,
@@ -1090,7 +1139,8 @@ bot.on('callback_query', async (query) => {
           `🔢 Send: *${payment.pay_amount} ${currency.toUpperCase()}*\n\n` +
           `📬 *Address:*\n\`${payment.pay_address}\`\n\n` +
           `⏱ Expires in about *60 minutes*.\n\n` +
-          `✅ Your balance updates *automatically* once the payment is confirmed.`,
+          `✅ Your balance updates *automatically* once the payment is confirmed.` +
+          sandboxNote,
         { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
       );
     } catch (err) {
@@ -1283,6 +1333,9 @@ bot
   .then(() => {
     bot.startPolling();
     console.log('🤖 Telegram polling started.');
+    setTimeout(() => {
+      checkPendingPayments().catch((e) => console.error('[poll startup]', e.message));
+    }, 2000);
   })
   .catch((err) => {
     console.error('FATAL: could not delete webhook / start polling:', err.message);
@@ -1303,4 +1356,6 @@ bot
 
 if (!process.env.NOWPAYMENTS_API_KEY) {
   console.warn('[deposit] NOWPAYMENTS_API_KEY missing — deposits disabled until set.');
+} else {
+  console.log(`[deposit] NOWPayments → https://${NOWPAYMENTS_API_HOST}/v1`);
 }
