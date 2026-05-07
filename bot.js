@@ -658,6 +658,16 @@ function depositAmountInlineKeyboard() {
   };
 }
 
+/** When deposit is under the minimum: offer support + return to deposit. */
+function supportOrSmallDepositKeyboard() {
+  const supportRow = process.env.SUPPORT_URL
+    ? [{ text: '🆘 Contact support ↗', url: process.env.SUPPORT_URL }]
+    : [{ text: '🆘 Contact support', callback_data: 'support' }];
+  return {
+    inline_keyboard: [supportRow, [{ text: `💰 Deposit at least $${MIN_DEPOSIT}`, callback_data: 'deposit' }]],
+  };
+}
+
 function sendAccount(chatId, userId) {
   const user = getUser(userId);
   const db = loadDB();
@@ -796,11 +806,18 @@ bot.on('message', async (msg) => {
   if (!user.state || user.state !== 'awaiting_deposit_amount') return;
 
   const amount = parseFloat(text.replace(/[^0-9.]/g, ''));
-  if (isNaN(amount) || amount < MIN_DEPOSIT) {
+  if (isNaN(amount) || amount <= 0) {
     return bot.sendMessage(
       chatId,
-      `⚠️ Enter a valid amount (at least $${MIN_DEPOSIT}).\n\nExample: 10 or 25.50`,
-      { reply_markup: mainReplyKeyboard() }
+      `⚠️ Enter a valid amount (use a number greater than 0).\n\nMinimum in the bot is <b>$${MIN_DEPOSIT}</b> USD.`,
+      { parse_mode: 'HTML', reply_markup: supportOrSmallDepositKeyboard() }
+    );
+  }
+  if (amount < MIN_DEPOSIT) {
+    return bot.sendMessage(
+      chatId,
+      `The minimum deposit here is <b>$${MIN_DEPOSIT}</b> USD.\n\nIf you need to pay <b>less</b> than that, contact support — they can help you complete your purchase another way.`,
+      { parse_mode: 'HTML', reply_markup: supportOrSmallDepositKeyboard() }
     );
   }
 
@@ -1010,11 +1027,19 @@ bot.on('callback_query', async (query) => {
     }
 
     const usdAmount = parseFloat(user.state.split(':')[1]);
-    if (isNaN(usdAmount) || usdAmount < MIN_DEPOSIT) {
+    if (isNaN(usdAmount) || usdAmount <= 0) {
       updateUser(userId, { state: null });
       return bot.sendMessage(chatId, '⚠️ Invalid amount. Please start the deposit again.', {
         reply_markup: { inline_keyboard: [[{ text: '💰 Deposit', callback_data: 'deposit' }]] },
       });
+    }
+    if (usdAmount < MIN_DEPOSIT) {
+      updateUser(userId, { state: null });
+      return bot.sendMessage(
+        chatId,
+        `The minimum deposit here is <b>$${MIN_DEPOSIT}</b> USD.\n\nNeed to pay less? Contact support — they can help you finish your order.`,
+        { parse_mode: 'HTML', reply_markup: supportOrSmallDepositKeyboard() }
+      );
     }
 
     if (!process.env.NOWPAYMENTS_API_KEY) {
