@@ -89,25 +89,47 @@ function normalizeProduct(p) {
     deliveryFolder: p.deliveryFolder == null || p.deliveryFolder === '' ? null : String(p.deliveryFolder),
     /** Pre-built zip file path (optional; sent as-is if set and file exists). */
     deliveryZipPath: p.deliveryZipPath == null || p.deliveryZipPath === '' ? null : String(p.deliveryZipPath),
+    /** Folder of individual stock documents; one file is delivered per quantity purchased. */
+    inventoryFolder: p.inventoryFolder == null || p.inventoryFolder === '' ? null : String(p.inventoryFolder),
   };
 }
 
-function eachLeaf(store, fn) {
-  for (const cat of store) {
-    for (const sub of cat.subs || []) {
-      for (const ss of sub.subs || []) {
-        fn(cat, sub, ss);
-      }
+function walkStore(nodes, fn, pathParts = [], labelParts = []) {
+  for (const node of nodes || []) {
+    const nextPath = [...pathParts, node.id];
+    const nextLabels = [...labelParts, node.name];
+    fn(node, nextPath, nextLabels);
+    if (Array.isArray(node.subs) && node.subs.length) {
+      walkStore(node.subs, fn, nextPath, nextLabels);
     }
   }
 }
 
+function eachLeaf(store, fn) {
+  walkStore(store, (node, pathParts, labelParts) => {
+    if (Array.isArray(node.subs) && node.subs.length) return;
+    fn(node, pathParts, labelParts);
+  });
+}
+
 function listStoreLeaves() {
   const out = [];
-  eachLeaf(getStore(), (cat, sub, ss) => {
+  eachLeaf(getStore(), (node, pathParts, labelParts) => {
     out.push({
-      path: `${cat.id}:${sub.id}:${ss.id}`,
-      label: `${cat.name} › ${sub.name} › ${ss.name}`,
+      path: pathParts.join(':'),
+      label: labelParts.join(' › '),
+    });
+  });
+  return out;
+}
+
+function listStoreNodes() {
+  const out = [];
+  walkStore(getStore(), (node, pathParts, labelParts) => {
+    out.push({
+      path: pathParts.join(':'),
+      label: labelParts.join(' › '),
+      hasChildren: Array.isArray(node.subs) && node.subs.length > 0,
     });
   });
   return out;
@@ -115,8 +137,8 @@ function listStoreLeaves() {
 
 function validateStoreReferences(products, store) {
   const ids = new Set(products.map((p) => p.id));
-  eachLeaf(store, (_c, _s, ss) => {
-    for (const pid of ss.productIds || []) {
+  walkStore(store, (node) => {
+    for (const pid of node.productIds || []) {
       if (!ids.has(pid)) {
         throw new Error(`Store lists unknown product id: ${pid}`);
       }
@@ -176,10 +198,21 @@ function addCategory(opts) {
   const name = String(opts.name || '').trim();
   if (!name) throw new Error('Category name is required');
   const cat = loadCatalog();
-  const id = uniqueId(opts.id || name, cat.store.map((c) => c.id));
-  cat.store.push({ id, name, subs: [] });
+  const parentPath = splitPath(opts.parentPath);
+  const parent = parentPath.length ? resolveStoreNode(parentPath, cat.store)?.node : null;
+  const siblings = parent ? parent.subs || [] : cat.store;
+  const id = uniqueId(opts.id || name, siblings.map((c) => c.id));
+  const node = { id, name, subs: [] };
+  const description = String(opts.description || '').trim();
+  if (description) node.description = description;
+  if (parent) {
+    if (!Array.isArray(parent.subs)) parent.subs = [];
+    parent.subs.push(node);
+  } else {
+    cat.store.push(node);
+  }
   saveCatalog(cat);
-  return { id, name };
+  return node;
 }
 
 function addGroup(opts) {
@@ -241,18 +274,25 @@ function appendProductToLeaf(store, catId, subId, subsubId, productId) {
  * @param {{ name: string, description: string, price: number|string, leaf: string }} opts leaf = "catId:subId:subsubId"
  */
 function addProduct(opts) {
-  const { name, description, price, leaf, fileId, filePath, deliveryFolder, deliveryZipPath } = opts;
-  const parts = String(leaf || '')
-    .split(':')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (parts.length !== 3) throw new Error('Leaf path must be category:mid:leaf (three ids)');
+  const { name, description, price, leaf, fileId, filePath, deliveryFolder, deliveryZipPath, inventoryFolder } = opts;
+  const parts = splitPath(leaf);
+  if (!parts.length) throw new Error('Choose where this product should appear');
 
   const cat = loadCatalog();
   const id = nextProductId(cat.products);
-  const product = normalizeProduct({ id, name, description, price, fileId, filePath, deliveryFolder, deliveryZipPath });
+  const product = normalizeProduct({
+    id,
+    name,
+    description,
+    price,
+    fileId,
+    filePath,
+    deliveryFolder,
+    deliveryZipPath,
+    inventoryFolder,
+  });
   cat.products.push(product);
-  appendProductToLeaf(cat.store, parts[0], parts[1], parts[2], id);
+  appendProductToPath(cat.store, parts, id);
   saveCatalog(cat);
   return product;
 }
@@ -275,6 +315,70 @@ function decodeStorePath(data) {
   if (data === 'browse' || data === 'browse_store') return [];
   if (String(data).startsWith('st:')) return String(data).slice(3).split(':').filter(Boolean);
   return null;
+}
+
+function splitPath(value) {
+  return String(value || '')
+    .split(':')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function resolveStoreNode(parts, storeOverride = null) {
+  const STORE = storeOverride || getStore();
+  const pathParts = Array.isArray(parts) ? parts.filter(Boolean) : splitPath(parts);
+  if (!pathParts.length) return { kind: 'root', node: null, children: STORE, path: [] };
+
+  let children = STORE;
+  let node = null;
+  for (const part of pathParts) {
+    node = (children || []).find((c) => c.id === part);
+    if (!node) return null;
+    children = node.subs || [];
+  }
+
+  return {
+    kind: 'node',
+    node,
+    children,
+    path: pathParts,
+    parentPath: pathParts.slice(0, -1),
+    productIds: Array.isArray(node.productIds) ? node.productIds : [],
+  };
+}
+
+function appendProductToPath(store, parts, productId) {
+  const hit = resolveStoreNode(parts, store);
+  if (!hit || !hit.node) throw new Error('Category not found');
+  if (!Array.isArray(hit.node.productIds)) hit.node.productIds = [];
+  if (!hit.node.productIds.includes(productId)) hit.node.productIds.push(productId);
+}
+
+function updateStoreNode(pathKey, patch) {
+  const cat = loadCatalog();
+  const hit = resolveStoreNode(splitPath(pathKey), cat.store);
+  if (!hit || !hit.node) throw new Error('Category not found');
+  if (patch.name !== undefined) {
+    const name = String(patch.name || '').trim();
+    if (!name) throw new Error('Name is required');
+    hit.node.name = name;
+  }
+  if (patch.description !== undefined) {
+    const description = String(patch.description || '').trim();
+    if (description) hit.node.description = description;
+    else delete hit.node.description;
+  }
+  if (patch.quantityAvailable !== undefined) {
+    if (patch.quantityAvailable === null || String(patch.quantityAvailable).trim() === '') {
+      delete hit.node.quantityAvailable;
+    } else {
+      const qty = Math.max(0, Math.floor(Number(patch.quantityAvailable)));
+      if (!Number.isFinite(qty)) throw new Error('Quantity must be a whole number');
+      hit.node.quantityAvailable = qty;
+    }
+  }
+  saveCatalog(cat);
+  return hit.node;
 }
 
 function resolveStore(parts) {
@@ -307,13 +411,16 @@ module.exports = {
   findProduct,
   saveCatalog,
   listStoreLeaves,
+  listStoreNodes,
   addCategory,
   addGroup,
   addSection,
   addProduct,
   updateProduct,
+  updateStoreNode,
   invalidateCatalogCache,
   encodeStorePath,
   decodeStorePath,
   resolveStore,
+  resolveStoreNode,
 };

@@ -319,10 +319,23 @@ function getLeafFromPathKey(pathKey) {
     .split(':')
     .map((s) => s.trim())
     .filter(Boolean);
-  if (parts.length !== 3) return null;
-  const r = catalog.resolveStore(parts);
-  if (!r || r.kind !== 'leaf') return null;
+  if (!parts.length) return null;
+  const r = catalog.resolveStoreNode(parts);
+  if (!r || r.kind !== 'node') return null;
   return { parts, r };
+}
+
+function productInventoryFiles(product) {
+  const folder = resolveProductFsPath(product.inventoryFolder);
+  if (!folder || !fs.existsSync(folder)) return null;
+  const st = fs.statSync(folder);
+  if (!st.isDirectory()) return null;
+  return fs
+    .readdirSync(folder)
+    .filter((name) => !name.startsWith('.'))
+    .map((name) => path.join(folder, name))
+    .filter((fp) => fs.statSync(fp).isFile())
+    .sort();
 }
 
 /** Current units available for this section (null = unlimited). Synced in db.sectionStock. */
@@ -335,7 +348,11 @@ function getSectionStock(pathKey) {
   }
   const hit = getLeafFromPathKey(pathKey);
   if (!hit) return 0;
-  const qa = hit.r.subsub.quantityAvailable;
+  const productId = (hit.r.productIds || [])[0];
+  const product = productId ? catalog.findProduct(productId) : null;
+  const inventory = product ? productInventoryFiles(product) : null;
+  if (inventory) return inventory.length;
+  const qa = hit.r.node.quantityAvailable;
   if (qa === undefined || qa === null) {
     return null;
   }
@@ -354,6 +371,12 @@ function setSectionStock(pathKey, value) {
 
 /** Returns false if not enough stock (only when stock is capped). */
 function decrementSectionStock(pathKey, qty) {
+  const hit = getLeafFromPathKey(pathKey);
+  const productId = hit ? (hit.r.productIds || [])[0] : null;
+  const product = productId ? catalog.findProduct(productId) : null;
+  const inventory = product ? productInventoryFiles(product) : null;
+  if (inventory) return inventory.length >= qty;
+
   const cur = getSectionStock(pathKey);
   if (cur === null) return true;
   if (cur < qty) return false;
@@ -426,22 +449,23 @@ function sendMainMenu(chatId) {
 
 function sendLeafQtyIntro(chatId, parts, userId) {
   const pathKey = sectionPathFromParts(parts);
-  const r = catalog.resolveStore(parts);
-  if (!r || r.kind !== 'leaf') {
+  const r = catalog.resolveStoreNode(parts);
+  if (!r || r.kind !== 'node') {
     return bot.sendMessage(chatId, '⚠️ That option is not available.', {
       reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
     });
   }
-  const ids = r.subsub.productIds || [];
+  const node = r.node;
+  const ids = r.productIds || [];
 
   if (ids.length === 0) {
-    const desc = (r.subsub.description && String(r.subsub.description).trim()) || 'No description yet.';
+    const desc = (node.description && String(node.description).trim()) || 'No description yet.';
     const stock = getSectionStock(pathKey);
     const stockLine =
       stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
     return bot.sendMessage(
       chatId,
-      `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}`,
+      `📂 <b>${escapeHtml(node.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}`,
       {
         parse_mode: 'HTML',
         reply_markup: {
@@ -453,11 +477,11 @@ function sendLeafQtyIntro(chatId, parts, userId) {
 
   if (ids.length > 1) {
     const rows = [];
-    const desc = (r.subsub.description && String(r.subsub.description).trim()) || '';
+    const desc = (node.description && String(node.description).trim()) || '';
     const stock = getSectionStock(pathKey);
     const stockLine =
       stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
-    let body = `📂 <b>${escapeHtml(r.subsub.name)}</b>`;
+    let body = `📂 <b>${escapeHtml(node.name)}</b>`;
     if (desc) body += `\n\n${escapeHtml(desc)}`;
     body += `\n\n${stockLine}`;
     const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
@@ -477,13 +501,13 @@ function sendLeafQtyIntro(chatId, parts, userId) {
 
   const stock = getSectionStock(pathKey);
   const desc =
-    (r.subsub.description && String(r.subsub.description).trim()) ||
+    (node.description && String(node.description).trim()) ||
     product.description ||
     'No description yet.';
   const stockLine =
     stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
 
-  let body = `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}\n💵 <b>Price each:</b> ${formatBalance(
+  let body = `📂 <b>${escapeHtml(node.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}\n💵 <b>Price each:</b> ${formatBalance(
     product.price
   )}\n\n`;
 
@@ -521,13 +545,12 @@ function handleSectionQtyMessage(chatId, userId, text, user) {
   const qty = parseInt(String(text).replace(/[^0-9]/g, ''), 10);
   const stock = getSectionStock(pathKey);
   const parts = pathKey.split(':').filter(Boolean);
-  const r = catalog.resolveStore(parts);
-  if (!r || r.kind !== 'leaf') {
+  const r = catalog.resolveStoreNode(parts);
+  if (!r || r.kind !== 'node') {
     updateUser(userId, { state: null, qtyLeafPath: null });
     return bot.sendMessage(chatId, '⚠️ Session expired. Open the shop again.');
   }
-  const leaf = r.subsub;
-  const productId = (leaf.productIds || [])[0];
+  const productId = (r.productIds || [])[0];
   const product = catalog.findProduct(productId);
   if (!product) {
     updateUser(userId, { state: null, qtyLeafPath: null });
@@ -578,23 +601,13 @@ function sendBrowse(chatId, userId) {
 function expandAutoBrowseParts(parts) {
   let p = parts.filter(Boolean);
   for (let guard = 0; guard < 24; guard += 1) {
-    const r = catalog.resolveStore(p);
-    if (!r || r.kind === 'root' || r.kind === 'leaf') break;
-    if (r.kind === 'cat') {
-      const subs = r.cat.subs || [];
-      if (subs.length === 1) {
-        p = [p[0], subs[0].id];
-        continue;
-      }
-      break;
-    }
-    if (r.kind === 'sub') {
-      const leaves = r.sub.subs || [];
-      if (leaves.length === 1) {
-        p = [p[0], p[1], leaves[0].id];
-        continue;
-      }
-      break;
+    const r = catalog.resolveStoreNode(p);
+    if (!r || r.kind === 'root') break;
+    const children = r.children || [];
+    const hasProducts = (r.productIds || []).length > 0;
+    if (!hasProducts && children.length === 1) {
+      p = [...p, children[0].id];
+      continue;
     }
     break;
   }
@@ -604,18 +617,8 @@ function expandAutoBrowseParts(parts) {
 /** Back from a leaf: skip tiers that had no real choice. */
 function shopBackCallbackFromLeaf(parts) {
   const p = parts.filter(Boolean);
-  if (p.length !== 3) {
-    if (p.length <= 1) return 'browse';
-    return catalog.encodeStorePath(p.slice(0, -1));
-  }
-  const [catId, subId] = p;
-  const rSub = catalog.resolveStore([catId, subId]);
-  if (rSub?.kind === 'sub' && (rSub.sub.subs || []).length <= 1) {
-    const rCat = catalog.resolveStore([catId]);
-    if (rCat?.kind === 'cat' && (rCat.cat.subs || []).length <= 1) return 'browse';
-    return catalog.encodeStorePath([catId]);
-  }
-  return catalog.encodeStorePath([catId, subId]);
+  if (p.length <= 1) return 'browse';
+  return catalog.encodeStorePath(p.slice(0, -1));
 }
 
 function sendBrowseAt(chatId, parts, userId) {
@@ -626,7 +629,7 @@ function sendBrowseAt(chatId, parts, userId) {
   }
   parts = expanded;
 
-  const r = catalog.resolveStore(parts);
+  const r = catalog.resolveStoreNode(parts);
   if (!r) {
     return bot.sendMessage(chatId, '⚠️ That shop path is not available. Open the shop again.', {
       reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
@@ -641,44 +644,24 @@ function sendBrowseAt(chatId, parts, userId) {
       rows.push([{ text: c.name, callback_data: catalog.encodeStorePath([c.id]) }]);
     }
     rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
-  } else if (r.kind === 'cat') {
-    body = `📂 <b>${escapeHtml(r.cat.name)}</b>`;
-    for (const s of r.cat.subs || []) {
-      rows.push([{ text: s.name, callback_data: catalog.encodeStorePath([parts[0], s.id]) }]);
-    }
-    rows.push([{ text: '🔙 Back', callback_data: 'browse' }]);
-  } else if (r.kind === 'sub') {
-    const leaves = r.sub.subs || [];
-    if (leaves.length === 0) {
-      const desc = (r.sub.description && String(r.sub.description).trim()) || 'No description yet.';
-      const qty = r.sub.quantityAvailable;
-      const stockLine =
-        qty === undefined || qty === null || qty === ''
-          ? '📦 <b>Available:</b> in stock'
-          : `📦 <b>Available:</b> ${Math.max(0, Math.floor(Number(qty) || 0))}`;
-      return bot.sendMessage(chatId, `📂 <b>${escapeHtml(r.sub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}`, {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath([parts[0]]) }]],
-        },
-      });
-    }
-    body = `📂 <b>${escapeHtml(r.sub.name)}</b>`;
-    for (const ss of leaves) {
-      rows.push([{ text: ss.name, callback_data: catalog.encodeStorePath([parts[0], parts[1], ss.id]) }]);
-    }
-    rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath([parts[0]]) }]);
-  } else if (r.kind === 'leaf') {
-    const ids = r.subsub.productIds || [];
-    if (userId != null && (ids.length === 0 || ids.length === 1)) {
+  } else if (r.kind === 'node') {
+    const children = r.children || [];
+    const ids = r.productIds || [];
+    if (children.length > 0) {
+      body = `📂 <b>${escapeHtml(r.node.name)}</b>`;
+      if (r.node.description) body += `\n\n${escapeHtml(r.node.description)}`;
+      for (const child of children) {
+        rows.push([{ text: child.name, callback_data: catalog.encodeStorePath([...parts, child.id]) }]);
+      }
+      rows.push([{ text: '🔙 Back', callback_data: parts.length <= 1 ? 'browse' : catalog.encodeStorePath(parts.slice(0, -1)) }]);
+    } else if (userId != null && (ids.length === 0 || ids.length === 1)) {
       return sendLeafQtyIntro(chatId, parts, userId);
-    }
-    if (ids.length === 0) {
+    } else if (ids.length === 0) {
       const stock = getSectionStock(sectionPathFromParts(parts));
       return bot.sendMessage(
         chatId,
-        `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(
-          (r.subsub.description && String(r.subsub.description).trim()) || 'No description yet.'
+        `📂 <b>${escapeHtml(r.node.name)}</b>\n\n${escapeHtml(
+          (r.node.description && String(r.node.description).trim()) || 'No description yet.'
         )}\n\n${
           stock === null
             ? '📦 <b>Available:</b> in stock'
@@ -691,13 +674,14 @@ function sendBrowseAt(chatId, parts, userId) {
           },
         }
       );
+    } else {
+      const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
+      body = `📂 <b>${escapeHtml(r.node.name)}</b>`;
+      for (const p of list) {
+        rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
+      }
+      rows.push([{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]);
     }
-    const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
-    body = `📂 <b>${escapeHtml(r.subsub.name)}</b>`;
-    for (const p of list) {
-      rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
-    }
-    rows.push([{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]);
   }
 
   return bot.sendMessage(chatId, body, { parse_mode: 'HTML', reply_markup: { inline_keyboard: rows } });
@@ -979,7 +963,7 @@ bot.on('callback_query', async (query) => {
       `🎉 *Purchase successful!*\n\n${product.name} × ${pend.qty}\nTotal: *${formatBalance(total)}*\n\nDelivering your file…`,
       { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
     );
-    return await deliverFile(chatId, product);
+    return await deliverPurchasedFiles(chatId, product, pend.qty);
   }
 
   // ── Product Detail ──
@@ -1037,7 +1021,7 @@ bot.on('callback_query', async (query) => {
     saveDB(db);
 
     await bot.sendMessage(chatId, `🎉 *Purchase successful!*\n\n${product.name}\n\nDelivering your file now...`, { parse_mode: 'Markdown' });
-    return await deliverFile(chatId, product);
+    return await deliverPurchasedFiles(chatId, product, 1);
   }
 
   // ── Download (re-deliver) ──
@@ -1222,6 +1206,43 @@ function zipFolderToTempZip(absFolder, productId) {
     archive.directory(absFolder, false);
     archive.finalize();
   });
+}
+
+async function deliverPurchasedFiles(chatId, product, qty = 1) {
+  const inventory = productInventoryFiles(product);
+  if (!inventory) return deliverFile(chatId, product);
+
+  const count = Math.max(1, Math.floor(Number(qty) || 1));
+  if (inventory.length < count) {
+    return bot.sendMessage(
+      chatId,
+      `📥 *${product.name}*\n\n⚠️ Only ${inventory.length} delivery file(s) are available right now.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  const selected = inventory.slice(0, count);
+  const soldDir = path.join(path.dirname(selected[0]), '_sold');
+  ensureDeliveryDir(soldDir);
+
+  for (let i = 0; i < selected.length; i += 1) {
+    const fp = selected[i];
+    await bot.sendDocument(chatId, fs.createReadStream(fp), {
+      caption: `📥 *${product.name}*${selected.length > 1 ? `\n\nFile ${i + 1} of ${selected.length}` : ''}`,
+      parse_mode: 'Markdown',
+    }, {
+      filename: path.basename(fp),
+      contentType: 'application/octet-stream',
+    });
+    const soldPath = path.join(soldDir, `${Date.now()}-${path.basename(fp)}`);
+    fs.renameSync(fp, soldPath);
+  }
+
+  return null;
+}
+
+function ensureDeliveryDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
 }
 
 async function deliverFile(chatId, product) {
