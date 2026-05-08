@@ -151,6 +151,80 @@ function nextProductId(products) {
   return `p${max + 1}`;
 }
 
+function slugifyId(value, fallback = 'item') {
+  const slug = String(value || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40);
+  return slug || fallback;
+}
+
+function uniqueId(base, existingIds) {
+  const root = slugifyId(base);
+  const seen = new Set(existingIds);
+  if (!seen.has(root)) return root;
+  for (let i = 2; i < 10000; i += 1) {
+    const candidate = `${root}_${i}`;
+    if (!seen.has(candidate)) return candidate;
+  }
+  throw new Error('Could not create a unique id');
+}
+
+function addCategory(opts) {
+  const name = String(opts.name || '').trim();
+  if (!name) throw new Error('Category name is required');
+  const cat = loadCatalog();
+  const id = uniqueId(opts.id || name, cat.store.map((c) => c.id));
+  cat.store.push({ id, name, subs: [] });
+  saveCatalog(cat);
+  return { id, name };
+}
+
+function addGroup(opts) {
+  const cat = loadCatalog();
+  const catId = String(opts.catId || '').trim();
+  const name = String(opts.name || '').trim();
+  if (!name) throw new Error('Subcategory name is required');
+  const hit = cat.store.find((c) => c.id === catId);
+  if (!hit) throw new Error('Category not found');
+  if (!Array.isArray(hit.subs)) hit.subs = [];
+  const id = uniqueId(opts.id || name, hit.subs.map((s) => s.id));
+  hit.subs.push({ id, name, subs: [] });
+  saveCatalog(cat);
+  return { id, name };
+}
+
+function addSection(opts) {
+  const cat = loadCatalog();
+  const catId = String(opts.catId || '').trim();
+  const subId = String(opts.subId || '').trim();
+  const name = String(opts.name || '').trim();
+  if (!name) throw new Error('Section name is required');
+  const hitCat = cat.store.find((c) => c.id === catId);
+  if (!hitCat) throw new Error('Category not found');
+  const hitSub = (hitCat.subs || []).find((s) => s.id === subId);
+  if (!hitSub) throw new Error('Subcategory not found');
+  if (!Array.isArray(hitSub.subs)) hitSub.subs = [];
+  const id = uniqueId(opts.id || name, hitSub.subs.map((s) => s.id));
+  const section = {
+    id,
+    name,
+    productIds: [],
+  };
+  const description = String(opts.description || '').trim();
+  if (description) section.description = description;
+  if (opts.quantityAvailable !== undefined && String(opts.quantityAvailable).trim() !== '') {
+    const qty = Math.max(0, Math.floor(Number(opts.quantityAvailable)));
+    if (!Number.isFinite(qty)) throw new Error('Quantity must be a whole number');
+    section.quantityAvailable = qty;
+  }
+  hitSub.subs.push(section);
+  saveCatalog(cat);
+  return section;
+}
+
 function appendProductToLeaf(store, catId, subId, subsubId, productId) {
   const cat = store.find((c) => c.id === catId);
   if (!cat) throw new Error('Category not found');
@@ -167,7 +241,7 @@ function appendProductToLeaf(store, catId, subId, subsubId, productId) {
  * @param {{ name: string, description: string, price: number|string, leaf: string }} opts leaf = "catId:subId:subsubId"
  */
 function addProduct(opts) {
-  const { name, description, price, leaf } = opts;
+  const { name, description, price, leaf, fileId, filePath, deliveryFolder, deliveryZipPath } = opts;
   const parts = String(leaf || '')
     .split(':')
     .map((s) => s.trim())
@@ -176,11 +250,20 @@ function addProduct(opts) {
 
   const cat = loadCatalog();
   const id = nextProductId(cat.products);
-  const product = normalizeProduct({ id, name, description, price });
+  const product = normalizeProduct({ id, name, description, price, fileId, filePath, deliveryFolder, deliveryZipPath });
   cat.products.push(product);
   appendProductToLeaf(cat.store, parts[0], parts[1], parts[2], id);
   saveCatalog(cat);
   return product;
+}
+
+function updateProduct(productId, patch) {
+  const cat = loadCatalog();
+  const idx = cat.products.findIndex((p) => p.id === productId);
+  if (idx === -1) throw new Error('Product not found');
+  cat.products[idx] = normalizeProduct({ ...cat.products[idx], ...patch, id: productId });
+  saveCatalog(cat);
+  return cat.products[idx];
 }
 
 function encodeStorePath(parts) {
@@ -224,7 +307,11 @@ module.exports = {
   findProduct,
   saveCatalog,
   listStoreLeaves,
+  addCategory,
+  addGroup,
+  addSection,
   addProduct,
+  updateProduct,
   invalidateCatalogCache,
   encodeStorePath,
   decodeStorePath,
