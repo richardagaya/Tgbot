@@ -441,7 +441,7 @@ function sendLeafQtyIntro(chatId, parts, userId) {
       stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
     return bot.sendMessage(
       chatId,
-      `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}\n\n⚠️ No product linked — add one in <code>catalog.json</code> or the admin page.`,
+      `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}`,
       {
         parse_mode: 'HTML',
         reply_markup: {
@@ -453,8 +453,13 @@ function sendLeafQtyIntro(chatId, parts, userId) {
 
   if (ids.length > 1) {
     const rows = [];
-    let body = '📂 <b>Shop</b>';
-    body += `\n\n${escapeHtml(r.subsub.name)}\nPick a <b>product</b>:`;
+    const desc = (r.subsub.description && String(r.subsub.description).trim()) || '';
+    const stock = getSectionStock(pathKey);
+    const stockLine =
+      stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
+    let body = `📂 <b>${escapeHtml(r.subsub.name)}</b>`;
+    if (desc) body += `\n\n${escapeHtml(desc)}`;
+    body += `\n\n${stockLine}`;
     const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
     for (const p of list) {
       rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
@@ -632,20 +637,34 @@ function sendBrowseAt(chatId, parts, userId) {
   let body = '📂 <b>Shop</b>';
 
   if (r.kind === 'root') {
-    body += '\n\nChoose a <b>category</b>:';
     for (const c of catalog.getStore()) {
       rows.push([{ text: c.name, callback_data: catalog.encodeStorePath([c.id]) }]);
     }
     rows.push([{ text: '🔙 Back', callback_data: 'main_menu' }]);
   } else if (r.kind === 'cat') {
-    body += `\n\n${escapeHtml(r.cat.name)}\nPick an option:`;
+    body = `📂 <b>${escapeHtml(r.cat.name)}</b>`;
     for (const s of r.cat.subs || []) {
       rows.push([{ text: s.name, callback_data: catalog.encodeStorePath([parts[0], s.id]) }]);
     }
     rows.push([{ text: '🔙 Back', callback_data: 'browse' }]);
   } else if (r.kind === 'sub') {
-    body += `\n\n${escapeHtml(r.sub.name)}\nPick one:`;
-    for (const ss of r.sub.subs || []) {
+    const leaves = r.sub.subs || [];
+    if (leaves.length === 0) {
+      const desc = (r.sub.description && String(r.sub.description).trim()) || 'No description yet.';
+      const qty = r.sub.quantityAvailable;
+      const stockLine =
+        qty === undefined || qty === null || qty === ''
+          ? '📦 <b>Available:</b> in stock'
+          : `📦 <b>Available:</b> ${Math.max(0, Math.floor(Number(qty) || 0))}`;
+      return bot.sendMessage(chatId, `📂 <b>${escapeHtml(r.sub.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🔙 Back', callback_data: catalog.encodeStorePath([parts[0]]) }]],
+        },
+      });
+    }
+    body = `📂 <b>${escapeHtml(r.sub.name)}</b>`;
+    for (const ss of leaves) {
       rows.push([{ text: ss.name, callback_data: catalog.encodeStorePath([parts[0], parts[1], ss.id]) }]);
     }
     rows.push([{ text: '🔙 Back', callback_data: catalog.encodeStorePath([parts[0]]) }]);
@@ -655,9 +674,16 @@ function sendBrowseAt(chatId, parts, userId) {
       return sendLeafQtyIntro(chatId, parts, userId);
     }
     if (ids.length === 0) {
+      const stock = getSectionStock(sectionPathFromParts(parts));
       return bot.sendMessage(
         chatId,
-        `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\nNo products here yet.`,
+        `📂 <b>${escapeHtml(r.subsub.name)}</b>\n\n${escapeHtml(
+          (r.subsub.description && String(r.subsub.description).trim()) || 'No description yet.'
+        )}\n\n${
+          stock === null
+            ? '📦 <b>Available:</b> in stock'
+            : `📦 <b>Available:</b> ${stock}`
+        }`,
         {
           parse_mode: 'HTML',
           reply_markup: {
@@ -667,7 +693,7 @@ function sendBrowseAt(chatId, parts, userId) {
       );
     }
     const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
-    body += `\n\n${escapeHtml(r.subsub.name)}\nPick a <b>product</b>:`;
+    body = `📂 <b>${escapeHtml(r.subsub.name)}</b>`;
     for (const p of list) {
       rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
     }
