@@ -381,6 +381,22 @@ function updateStoreNode(pathKey, patch) {
   return hit.node;
 }
 
+function deleteStoreNode(pathKey) {
+  const cat = loadCatalog();
+  const parts = splitPath(pathKey);
+  if (!parts.length) throw new Error('Choose a category to delete');
+
+  const parentHit = parts.length === 1 ? { children: cat.store } : resolveStoreNode(parts.slice(0, -1), cat.store);
+  if (!parentHit || !Array.isArray(parentHit.children)) throw new Error('Parent category not found');
+
+  const idx = parentHit.children.findIndex((node) => node.id === parts[parts.length - 1]);
+  if (idx === -1) throw new Error('Category not found');
+
+  const [removed] = parentHit.children.splice(idx, 1);
+  saveCatalog(cat);
+  return removed;
+}
+
 function resolveStore(parts) {
   const STORE = getStore();
   if (!parts.length) return { kind: 'root' };
@@ -418,6 +434,7 @@ module.exports = {
   addProduct,
   updateProduct,
   updateStoreNode,
+  deleteStoreNode,
   invalidateCatalogCache,
   encodeStorePath,
   decodeStorePath,

@@ -259,6 +259,7 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
     .err { background: #fef3f2; border: 1px solid #fecdca; padding: 0.85rem 1rem; border-radius: 12px; }
     .warn { background: #fffaeb; border: 1px solid #fedf89; padding: 0.85rem 1rem; border-radius: 12px; }
     .pill { display: inline-block; margin: 0.3rem 0.25rem 0 0; padding: 0.18rem 0.5rem; border-radius: 999px; background: #eef2ff; color: #312e81; font-size: 0.82rem; }
+    .danger { background: #b42318; }
   </style>
 </head>
 <body>
@@ -342,6 +343,13 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
           <label>Description</label>
           <textarea name="description" id="editCategoryDescription" maxlength="1500"></textarea>
           <button type="submit">Save Category</button>
+        </form>
+        <form method="post" action="${ADMIN_PATH}" id="deleteCategoryForm">
+          <input type="hidden" name="token" value="${esc(token)}" />
+          <input type="hidden" name="action" value="delete_category" />
+          <input type="hidden" name="path" id="deleteCategoryPath" />
+          <p class="hint" id="deleteCategoryHint"></p>
+          <button type="submit" class="danger">Delete Category</button>
         </form>
       </section>
     </div>
@@ -498,13 +506,23 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
       const select = document.getElementById('editCategoryPath');
       const name = document.getElementById('editCategoryName');
       const description = document.getElementById('editCategoryDescription');
+      const deletePath = document.getElementById('deleteCategoryPath');
+      const deleteHint = document.getElementById('deleteCategoryHint');
+      const deleteForm = document.getElementById('deleteCategoryForm');
       if (!select || !select.value) return;
       function refresh() {
-        const node = nodeFor((select.value || '').split(':').filter(Boolean));
+        const path = (select.value || '').split(':').filter(Boolean);
+        const node = nodeFor(path);
         name.value = node ? node.name || '' : '';
         description.value = node ? node.description || '' : '';
+        deletePath.value = select.value || '';
+        deleteHint.textContent = node ? 'This deletes "' + labelFor(path) + '" and everything inside it from the shop.' : '';
       }
       select.addEventListener('change', refresh);
+      deleteForm.addEventListener('submit', (event) => {
+        const label = labelFor((select.value || '').split(':').filter(Boolean));
+        if (!window.confirm('Delete "' + label + '" and all sub categories inside it?')) event.preventDefault();
+      });
       refresh();
     }
 
@@ -581,6 +599,11 @@ async function handleAdminPost(req, tokenEnv) {
         description: fields.description,
       });
       return pageHtml(tokenEnv, { ok: `Updated category: ${node.name}`, activeTab: 'categories' });
+    }
+
+    if (fields.action === 'delete_category') {
+      const node = catalog.deleteStoreNode(fields.path);
+      return pageHtml(tokenEnv, { ok: `Deleted category: ${node.name}`, activeTab: 'categories' });
     }
 
     if (fields.action === 'upload_product_file') {
