@@ -153,21 +153,6 @@ function moveInventoryFiles(product, files, { replace = false } = {}) {
   };
 }
 
-function categoryOptions({ includeRoot = false } = {}) {
-  const nodes = catalog.listStoreNodes();
-  const root = includeRoot ? '<option value="">Top level category</option>' : '';
-  const opts = nodes
-    .map((n) => `<option value="${esc(n.path)}">${esc(n.label)}</option>`)
-    .join('\n');
-  return root + (opts || (includeRoot ? '' : '<option value="">Create a category first</option>'));
-}
-
-function productOptions() {
-  const products = catalog.getProducts();
-  if (!products.length) return '<option value="">No products yet</option>';
-  return products.map((p) => `<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.id)})</option>`).join('\n');
-}
-
 function productLocationPaths(productId) {
   const paths = [];
   for (const node of catalog.listStoreNodes()) {
@@ -175,6 +160,42 @@ function productLocationPaths(productId) {
     if (hit?.node && (hit.node.productIds || []).includes(productId)) paths.push(node.path);
   }
   return paths;
+}
+
+function jsonForScript(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c');
+}
+
+function categoryEditOptions() {
+  const nodes = catalog.listStoreNodes();
+  if (!nodes.length) return '<option value="">No categories yet</option>';
+  return nodes.map((n) => `<option value="${esc(n.path)}">${esc(n.label)}</option>`).join('\n');
+}
+
+function productSortValue(product) {
+  const m = /^p(\d+)$/i.exec(product.id || '');
+  return m ? Number(m[1]) : 0;
+}
+
+function renderRecentProducts(limit = 10) {
+  const products = [...catalog.getProducts()]
+    .sort((a, b) => productSortValue(b) - productSortValue(a))
+    .slice(0, limit);
+  if (!products.length) return '<p class="muted">No files have been added yet.</p>';
+
+  return `<table><thead><tr><th>File</th><th>Category</th><th>Price</th><th>Uploaded</th><th>Description</th></tr></thead><tbody>${products
+    .map((p) => {
+      const locations = productLocationPaths(p.id)
+        .map((pathKey) => {
+          const node = catalog.listStoreNodes().find((n) => n.path === pathKey);
+          return node ? node.label : pathKey;
+        })
+        .join('<br>') || '<span class="muted">Not shown in shop</span>';
+      return `<tr><td><code>${esc(p.id)}</code><br>${esc(p.name)}</td><td>${locations}</td><td>$${Number(
+        p.price
+      ).toFixed(2)}</td><td>${inventoryCount(p)} file(s)</td><td>${esc(p.description || '')}</td></tr>`;
+    })
+    .join('\n')}</tbody></table>`;
 }
 
 function renderTreeNodes(nodes, pathParts = []) {
@@ -200,21 +221,10 @@ function renderTreeNodes(nodes, pathParts = []) {
     .join('\n');
 }
 
-function renderProducts() {
-  const products = catalog.getProducts();
-  if (!products.length) return '<p class="muted">No products yet.</p>';
-  return `<table><thead><tr><th>Product</th><th>Price</th><th>Available Files</th><th>Description</th></tr></thead><tbody>${products
-    .map(
-      (p) =>
-        `<tr><td><code>${esc(p.id)}</code><br>${esc(p.name)}</td><td>$${Number(p.price).toFixed(2)}</td><td>${inventoryCount(
-          p
-        )}</td><td>${esc(p.description || '')}</td></tr>`
-    )
-    .join('\n')}</tbody></table>`;
-}
-
-function pageHtml(token, { ok, err } = {}) {
+function pageHtml(token, { ok, err, activeTab } = {}) {
   const banner = ok ? `<p class="ok">${esc(ok)}</p>` : err ? `<p class="err">${esc(err)}</p>` : '';
+  const storeJson = jsonForScript(catalog.getStore());
+  const tab = ['add-file', 'categories', 'recent'].includes(activeTab) ? activeTab : 'add-file';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -222,7 +232,7 @@ function pageHtml(token, { ok, err } = {}) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Shop Admin</title>
   <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 64rem; margin: 2rem auto; padding: 0 1rem 3rem; background: #f6f7f9; color: #151515; }
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 70rem; margin: 2rem auto; padding: 0 1rem 3rem; background: #f6f7f9; color: #151515; }
     h1 { margin: 0 0 0.25rem; font-size: 1.8rem; }
     h2 { margin: 0 0 0.8rem; font-size: 1.05rem; }
     label { display: block; margin-top: 0.75rem; font-weight: 700; font-size: 0.88rem; }
@@ -237,6 +247,12 @@ function pageHtml(token, { ok, err } = {}) {
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 1rem; margin-top: 1rem; }
     .card { background: white; border: 1px solid #e5e7eb; border-radius: 18px; padding: 1rem; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
     .full { grid-column: 1 / -1; }
+    .tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+    .tab-btn { margin: 0; border: 1px solid #d1d5db; background: white; color: #111827; }
+    .tab-btn.active { background: #111827; color: white; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem; }
     .muted { color: #667085; font-size: 0.9rem; }
     .hint { color: #667085; font-size: 0.82rem; margin-top: 0.35rem; }
     .ok { background: #ecfdf3; border: 1px solid #abefc6; padding: 0.85rem 1rem; border-radius: 12px; }
@@ -247,70 +263,264 @@ function pageHtml(token, { ok, err } = {}) {
 </head>
 <body>
   <h1>Shop Admin</h1>
-  <p class="muted">Create nested categories, add products, and upload delivery files. Only use this for lawful digital goods you are allowed to sell.</p>
+  <p class="muted">Add files, choose exactly where they appear in the shop, and manage categories from one simple page.</p>
   <p class="warn"><strong>Railway:</strong> add a persistent volume or uploads/catalog changes may disappear after redeploys.</p>
   ${banner}
 
-  <div class="grid">
-    <section class="card">
-      <h2>Add Category</h2>
-      <form method="post" action="${ADMIN_PATH}">
-        <input type="hidden" name="token" value="${esc(token)}" />
-        <input type="hidden" name="action" value="add_category" />
-        <label>Inside</label>
-        <select name="parentPath">${categoryOptions({ includeRoot: true })}</select>
-        <label>Category Name</label>
-        <input name="name" required maxlength="120" placeholder="Example: Old fullz" />
-        <label>Description</label>
-        <textarea name="description" maxlength="1500" placeholder="What this category contains"></textarea>
-        <button type="submit">Create Category</button>
-      </form>
-    </section>
+  <div class="tabs">
+    <button type="button" class="tab-btn ${tab === 'add-file' ? 'active' : ''}" data-tab="add-file">Add File</button>
+    <button type="button" class="tab-btn ${tab === 'categories' ? 'active' : ''}" data-tab="categories">Categories</button>
+    <button type="button" class="tab-btn ${tab === 'recent' ? 'active' : ''}" data-tab="recent">Recently Added</button>
+  </div>
 
-    <section class="card">
-      <h2>Add Product + Files</h2>
-      <form method="post" action="${ADMIN_PATH}" enctype="multipart/form-data">
-        <input type="hidden" name="token" value="${esc(token)}" />
-        <input type="hidden" name="action" value="add_product" />
-        <label>Show Product Under</label>
-        <select name="leaf" required>${categoryOptions()}</select>
-        <label>Product Name</label>
-        <input name="name" required maxlength="200" placeholder="Example: January pack" />
-        <label>Description</label>
-        <textarea name="description" maxlength="2000" placeholder="Shown before purchase"></textarea>
-        <label>Price Per File (USD)</label>
-        <input name="price" type="number" min="0" step="0.01" required placeholder="9.99" />
-        <label>Upload Delivery Documents</label>
-        <input name="files" type="file" multiple required />
-        <p class="hint">Quantity is automatic: 1 uploaded document = 1 available item. If a user buys 3, the bot sends 3 files.</p>
-        <button type="submit">Create Product</button>
-      </form>
-    </section>
+  <section class="card tab-panel ${tab === 'add-file' ? 'active' : ''}" id="tab-add-file">
+    <h2>Add File</h2>
+    <form method="post" action="${ADMIN_PATH}" enctype="multipart/form-data">
+      <input type="hidden" name="token" value="${esc(token)}" />
+      <input type="hidden" name="action" value="add_product" />
+      <input type="hidden" name="leaf" id="productLeaf" />
+      <label>Category</label>
+      <select id="productCat" required></select>
+      <div id="productSubWrap">
+        <label>Sub Category</label>
+        <select id="productSub"></select>
+      </div>
+      <div id="productSubSubWrap">
+        <label>Sub Sub Category</label>
+        <select id="productSubSub"></select>
+      </div>
+      <p class="hint" id="productPathHint"></p>
+      <label>File Name</label>
+      <input name="name" required maxlength="200" placeholder="Example: January pack" />
+      <label>Description users see before purchase</label>
+      <textarea name="description" maxlength="2000" placeholder="Explain what this file contains"></textarea>
+      <label>Price Per File (USD)</label>
+      <input name="price" type="number" min="0" step="0.01" required placeholder="9.99" />
+      <label>Upload File</label>
+      <input name="files" type="file" multiple required />
+      <p class="hint">Quantity is automatic: each uploaded document becomes one available item.</p>
+      <button type="submit">Upload File</button>
+    </form>
+  </section>
 
-    <section class="card">
-      <h2>Replace Product Files</h2>
-      <form method="post" action="${ADMIN_PATH}" enctype="multipart/form-data">
-        <input type="hidden" name="token" value="${esc(token)}" />
-        <input type="hidden" name="action" value="upload_product_file" />
-        <label>Product</label>
-        <select name="productId" required>${productOptions()}</select>
-        <label>New Delivery Documents</label>
-        <input name="files" type="file" multiple required />
-        <p class="hint">This replaces available inventory files. Sold files stay archived separately.</p>
-        <button type="submit">Replace Files</button>
-      </form>
-    </section>
+  <section class="tab-panel ${tab === 'categories' ? 'active' : ''}" id="tab-categories">
+    <div class="two">
+      <section class="card">
+        <h2>Add Category</h2>
+        <form method="post" action="${ADMIN_PATH}">
+          <input type="hidden" name="token" value="${esc(token)}" />
+          <input type="hidden" name="action" value="add_category" />
+          <input type="hidden" name="parentPath" id="categoryParentPath" />
+          <label>Put New Category Inside</label>
+          <select id="categoryParentCat"></select>
+          <div id="categoryParentSubWrap">
+            <label>Sub Category</label>
+            <select id="categoryParentSub"></select>
+          </div>
+          <div id="categoryParentSubSubWrap">
+            <label>Sub Sub Category</label>
+            <select id="categoryParentSubSub"></select>
+          </div>
+          <p class="hint" id="categoryParentHint"></p>
+          <label>New Category Name</label>
+          <input name="name" required maxlength="120" placeholder="Example: Utility bills" />
+          <label>Description</label>
+          <textarea name="description" maxlength="1500" placeholder="What this category contains"></textarea>
+          <button type="submit">Create Category</button>
+        </form>
+      </section>
 
-    <section class="card full">
-      <h2>Shop Tree</h2>
+      <section class="card">
+        <h2>Modify Category</h2>
+        <form method="post" action="${ADMIN_PATH}">
+          <input type="hidden" name="token" value="${esc(token)}" />
+          <input type="hidden" name="action" value="update_category" />
+          <label>Current Category</label>
+          <select name="path" id="editCategoryPath" required>${categoryEditOptions()}</select>
+          <label>Category Name</label>
+          <input name="name" id="editCategoryName" required maxlength="120" />
+          <label>Description</label>
+          <textarea name="description" id="editCategoryDescription" maxlength="1500"></textarea>
+          <button type="submit">Save Category</button>
+        </form>
+      </section>
+    </div>
+
+    <section class="card full" style="margin-top:1rem">
+      <h2>Current Categories</h2>
       ${catalog.getStore().length ? `<ul>${renderTreeNodes(catalog.getStore())}</ul>` : '<p class="muted">No categories yet.</p>'}
     </section>
+  </section>
 
-    <section class="card full">
-      <h2>Products</h2>
-      ${renderProducts()}
-    </section>
-  </div>
+  <section class="card tab-panel ${tab === 'recent' ? 'active' : ''}" id="tab-recent">
+    <h2>Recently Added</h2>
+    ${renderRecentProducts()}
+  </section>
+
+  <script>
+    const STORE = ${storeJson};
+
+    function childrenFor(path) {
+      let children = STORE;
+      for (const part of path) {
+        const node = (children || []).find((item) => item.id === part);
+        if (!node) return [];
+        children = node.subs || [];
+      }
+      return children || [];
+    }
+
+    function nodeFor(path) {
+      let children = STORE;
+      let node = null;
+      for (const part of path) {
+        node = (children || []).find((item) => item.id === part);
+        if (!node) return null;
+        children = node.subs || [];
+      }
+      return node;
+    }
+
+    function setOptions(select, items, placeholder) {
+      select.innerHTML = '';
+      if (placeholder !== null) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = placeholder;
+        select.appendChild(option);
+      }
+      for (const item of items) {
+        const option = document.createElement('option');
+        option.value = item.id;
+        option.textContent = item.name;
+        select.appendChild(option);
+      }
+    }
+
+    function selectedPath(ids) {
+      return ids.map((id) => document.getElementById(id).value).filter(Boolean);
+    }
+
+    function labelFor(path) {
+      const labels = [];
+      let children = STORE;
+      for (const part of path) {
+        const node = (children || []).find((item) => item.id === part);
+        if (!node) break;
+        labels.push(node.name);
+        children = node.subs || [];
+      }
+      return labels.join(' > ');
+    }
+
+    function setupProductCascade() {
+      const cat = document.getElementById('productCat');
+      const sub = document.getElementById('productSub');
+      const subSub = document.getElementById('productSubSub');
+      const subWrap = document.getElementById('productSubWrap');
+      const subSubWrap = document.getElementById('productSubSubWrap');
+      const hidden = document.getElementById('productLeaf');
+      const hint = document.getElementById('productPathHint');
+
+      function refresh() {
+        const catPath = selectedPath(['productCat']);
+        const subItems = catPath.length ? childrenFor(catPath) : [];
+        subWrap.style.display = subItems.length ? '' : 'none';
+        if (!subItems.some((item) => item.id === sub.value)) setOptions(sub, subItems, 'Choose sub category');
+
+        const subPath = selectedPath(['productCat', 'productSub']);
+        const subSubItems = subPath.length >= 2 ? childrenFor(subPath) : [];
+        subSubWrap.style.display = subSubItems.length ? '' : 'none';
+        if (!subSubItems.some((item) => item.id === subSub.value)) setOptions(subSub, subSubItems, 'Choose sub sub category');
+
+        const path = selectedPath(['productCat', 'productSub', 'productSubSub']);
+        hidden.value = path.join(':');
+        const hasMore = path.length ? childrenFor(path).length > 0 : false;
+        hint.textContent = path.length
+          ? (hasMore ? 'Choose the next category level before uploading.' : 'File will appear under: ' + labelFor(path))
+          : 'Choose a category before uploading.';
+      }
+
+      setOptions(cat, STORE, 'Choose category');
+      cat.addEventListener('change', () => {
+        setOptions(sub, [], 'Choose sub category');
+        setOptions(subSub, [], 'Choose sub sub category');
+        refresh();
+      });
+      sub.addEventListener('change', () => {
+        setOptions(subSub, [], 'Choose sub sub category');
+        refresh();
+      });
+      subSub.addEventListener('change', refresh);
+      refresh();
+    }
+
+    function setupCategoryParentCascade() {
+      const cat = document.getElementById('categoryParentCat');
+      const sub = document.getElementById('categoryParentSub');
+      const subSub = document.getElementById('categoryParentSubSub');
+      const subWrap = document.getElementById('categoryParentSubWrap');
+      const subSubWrap = document.getElementById('categoryParentSubSubWrap');
+      const hidden = document.getElementById('categoryParentPath');
+      const hint = document.getElementById('categoryParentHint');
+
+      function refresh() {
+        const catPath = selectedPath(['categoryParentCat']);
+        const subItems = catPath.length ? childrenFor(catPath) : [];
+        subWrap.style.display = subItems.length ? '' : 'none';
+        if (!subItems.some((item) => item.id === sub.value)) setOptions(sub, subItems, 'Choose sub category');
+
+        const subPath = selectedPath(['categoryParentCat', 'categoryParentSub']);
+        const subSubItems = subPath.length >= 2 ? childrenFor(subPath) : [];
+        subSubWrap.style.display = subSubItems.length ? '' : 'none';
+        if (!subSubItems.some((item) => item.id === subSub.value)) setOptions(subSub, subSubItems, 'Choose sub sub category');
+
+        const path = selectedPath(['categoryParentCat', 'categoryParentSub', 'categoryParentSubSub']);
+        hidden.value = path.join(':');
+        hint.textContent = path.length ? 'New category will be created inside: ' + labelFor(path) : 'New category will be created at the top level.';
+      }
+
+      setOptions(cat, STORE, 'Top level category');
+      cat.addEventListener('change', () => {
+        setOptions(sub, [], 'Choose sub category');
+        setOptions(subSub, [], 'Choose sub sub category');
+        refresh();
+      });
+      sub.addEventListener('change', () => {
+        setOptions(subSub, [], 'Choose sub sub category');
+        refresh();
+      });
+      subSub.addEventListener('change', refresh);
+      refresh();
+    }
+
+    function setupCategoryEdit() {
+      const select = document.getElementById('editCategoryPath');
+      const name = document.getElementById('editCategoryName');
+      const description = document.getElementById('editCategoryDescription');
+      if (!select || !select.value) return;
+      function refresh() {
+        const node = nodeFor((select.value || '').split(':').filter(Boolean));
+        name.value = node ? node.name || '' : '';
+        description.value = node ? node.description || '' : '';
+      }
+      select.addEventListener('change', refresh);
+      refresh();
+    }
+
+    document.querySelectorAll('.tab-btn').forEach((button) => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+        document.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
+        button.classList.add('active');
+        document.getElementById('tab-' + button.dataset.tab).classList.add('active');
+      });
+    });
+
+    setupProductCascade();
+    setupCategoryParentCascade();
+    setupCategoryEdit();
+  </script>
 </body>
 </html>`;
 }
@@ -345,11 +555,14 @@ async function handleAdminPost(req, tokenEnv) {
         name: fields.name,
         description: fields.description,
       });
-      return pageHtml(tokenEnv, { ok: `Created category: ${node.name}` });
+      return pageHtml(tokenEnv, { ok: `Created category: ${node.name}`, activeTab: 'categories' });
     }
 
     if (fields.action === 'add_product') {
       if (!files.length) throw new Error('Upload at least one delivery document');
+      const target = catalog.resolveStoreNode(fields.leaf);
+      if (!target || !target.node) throw new Error('Choose a category for this file');
+      if ((target.children || []).length) throw new Error('Choose the lowest category level before uploading the file');
       const product = catalog.addProduct({
         leaf: fields.leaf,
         name: fields.name,
@@ -358,8 +571,16 @@ async function handleAdminPost(req, tokenEnv) {
       });
       const moved = moveInventoryFiles(product, files);
       catalog.updateProduct(product.id, moved.patch);
-      catalog.updateStoreNode(fields.leaf, { quantityAvailable: moved.count });
-      return pageHtml(tokenEnv, { ok: `Created ${product.name} with ${moved.count} available file(s)` });
+      catalog.updateStoreNode(fields.leaf, { description: fields.description, quantityAvailable: moved.count });
+      return pageHtml(tokenEnv, { ok: `Created ${product.name} with ${moved.count} available file(s)`, activeTab: 'recent' });
+    }
+
+    if (fields.action === 'update_category') {
+      const node = catalog.updateStoreNode(fields.path, {
+        name: fields.name,
+        description: fields.description,
+      });
+      return pageHtml(tokenEnv, { ok: `Updated category: ${node.name}`, activeTab: 'categories' });
     }
 
     if (fields.action === 'upload_product_file') {
@@ -371,7 +592,7 @@ async function handleAdminPost(req, tokenEnv) {
       for (const pathKey of productLocationPaths(product.id)) {
         catalog.updateStoreNode(pathKey, { quantityAvailable: moved.count });
       }
-      return pageHtml(tokenEnv, { ok: `Updated ${product.name}: ${moved.count} available file(s)` });
+      return pageHtml(tokenEnv, { ok: `Updated ${product.name}: ${moved.count} available file(s)`, activeTab: 'recent' });
     }
 
     throw new Error('Unknown action');
