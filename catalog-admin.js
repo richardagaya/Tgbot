@@ -198,29 +198,6 @@ function renderRecentProducts(limit = 10) {
     .join('\n')}</tbody></table>`;
 }
 
-function renderTreeNodes(nodes, pathParts = []) {
-  const productsById = new Map(catalog.getProducts().map((p) => [p.id, p]));
-  return (nodes || [])
-    .map((node) => {
-      const pathKey = [...pathParts, node.id].join(':');
-      const products = (node.productIds || [])
-        .map((id) => productsById.get(id))
-        .filter(Boolean)
-        .map((p) => `<span class="pill">${esc(p.name)} - $${Number(p.price).toFixed(2)} - ${inventoryCount(p)} left</span>`)
-        .join(' ');
-      const desc = node.description ? `<div class="muted">${esc(node.description)}</div>` : '';
-      const qty =
-        node.quantityAvailable === undefined || node.quantityAvailable === null
-          ? ''
-          : `<span class="muted">stock: ${esc(node.quantityAvailable)}</span>`;
-      const children = node.subs?.length ? `<ul>${renderTreeNodes(node.subs, [...pathParts, node.id])}</ul>` : '';
-      return `<li><strong>${esc(node.name)}</strong> <code>${esc(pathKey)}</code> ${qty}${desc}${
-        products || ''
-      }${children}</li>`;
-    })
-    .join('\n');
-}
-
 function pageHtml(token, { ok, err, activeTab } = {}) {
   const banner = ok ? `<p class="ok">${esc(ok)}</p>` : err ? `<p class="err">${esc(err)}</p>` : '';
   const storeJson = jsonForScript(catalog.getStore());
@@ -325,8 +302,6 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
           <p class="hint" id="categoryParentHint"></p>
           <label>New Category Name</label>
           <input name="name" required maxlength="120" placeholder="Example: Utility bills" />
-          <label>Description</label>
-          <textarea name="description" maxlength="1500" placeholder="What this category contains"></textarea>
           <button type="submit">Create Category</button>
         </form>
       </section>
@@ -344,20 +319,29 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
           <textarea name="description" id="editCategoryDescription" maxlength="1500"></textarea>
           <button type="submit">Save Category</button>
         </form>
+      </section>
+
+      <section class="card">
+        <h2>Delete Category</h2>
         <form method="post" action="${ADMIN_PATH}" id="deleteCategoryForm">
           <input type="hidden" name="token" value="${esc(token)}" />
           <input type="hidden" name="action" value="delete_category" />
           <input type="hidden" name="path" id="deleteCategoryPath" />
+          <label>Category</label>
+          <select id="deleteCategoryCat" required></select>
+          <div id="deleteCategorySubWrap">
+            <label>Sub Category</label>
+            <select id="deleteCategorySub"></select>
+          </div>
+          <div id="deleteCategorySubSubWrap">
+            <label>Sub Sub Category</label>
+            <select id="deleteCategorySubSub"></select>
+          </div>
           <p class="hint" id="deleteCategoryHint"></p>
           <button type="submit" class="danger">Delete Category</button>
         </form>
       </section>
     </div>
-
-    <section class="card full" style="margin-top:1rem">
-      <h2>Current Categories</h2>
-      ${catalog.getStore().length ? `<ul>${renderTreeNodes(catalog.getStore())}</ul>` : '<p class="muted">No categories yet.</p>'}
-    </section>
   </section>
 
   <section class="card tab-panel ${tab === 'recent' ? 'active' : ''}" id="tab-recent">
@@ -506,21 +490,58 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
       const select = document.getElementById('editCategoryPath');
       const name = document.getElementById('editCategoryName');
       const description = document.getElementById('editCategoryDescription');
-      const deletePath = document.getElementById('deleteCategoryPath');
-      const deleteHint = document.getElementById('deleteCategoryHint');
-      const deleteForm = document.getElementById('deleteCategoryForm');
       if (!select || !select.value) return;
       function refresh() {
         const path = (select.value || '').split(':').filter(Boolean);
         const node = nodeFor(path);
         name.value = node ? node.name || '' : '';
         description.value = node ? node.description || '' : '';
-        deletePath.value = select.value || '';
-        deleteHint.textContent = node ? 'This deletes "' + labelFor(path) + '" and everything inside it from the shop.' : '';
       }
       select.addEventListener('change', refresh);
+      refresh();
+    }
+
+    function setupCategoryDeleteCascade() {
+      const cat = document.getElementById('deleteCategoryCat');
+      const sub = document.getElementById('deleteCategorySub');
+      const subSub = document.getElementById('deleteCategorySubSub');
+      const subWrap = document.getElementById('deleteCategorySubWrap');
+      const subSubWrap = document.getElementById('deleteCategorySubSubWrap');
+      const hidden = document.getElementById('deleteCategoryPath');
+      const hint = document.getElementById('deleteCategoryHint');
+      const deleteForm = document.getElementById('deleteCategoryForm');
+
+      function refresh() {
+        const catPath = selectedPath(['deleteCategoryCat']);
+        const subItems = catPath.length ? childrenFor(catPath) : [];
+        subWrap.style.display = subItems.length ? '' : 'none';
+        if (!subItems.some((item) => item.id === sub.value)) setOptions(sub, subItems, 'Delete whole category');
+
+        const subPath = selectedPath(['deleteCategoryCat', 'deleteCategorySub']);
+        const subSubItems = subPath.length >= 2 ? childrenFor(subPath) : [];
+        subSubWrap.style.display = subSubItems.length ? '' : 'none';
+        if (!subSubItems.some((item) => item.id === subSub.value)) setOptions(subSub, subSubItems, 'Delete whole sub category');
+
+        const path = selectedPath(['deleteCategoryCat', 'deleteCategorySub', 'deleteCategorySubSub']);
+        hidden.value = path.join(':');
+        hint.textContent = path.length
+          ? 'This deletes "' + labelFor(path) + '" and everything inside it from the shop.'
+          : 'Choose the category, sub category, or sub sub category to delete.';
+      }
+
+      setOptions(cat, STORE, 'Choose category');
+      cat.addEventListener('change', () => {
+        setOptions(sub, [], 'Delete whole category');
+        setOptions(subSub, [], 'Delete whole sub category');
+        refresh();
+      });
+      sub.addEventListener('change', () => {
+        setOptions(subSub, [], 'Delete whole sub category');
+        refresh();
+      });
+      subSub.addEventListener('change', refresh);
       deleteForm.addEventListener('submit', (event) => {
-        const label = labelFor((select.value || '').split(':').filter(Boolean));
+        const label = labelFor((hidden.value || '').split(':').filter(Boolean));
         if (!window.confirm('Delete "' + label + '" and all sub categories inside it?')) event.preventDefault();
       });
       refresh();
@@ -538,6 +559,7 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
     setupProductCascade();
     setupCategoryParentCascade();
     setupCategoryEdit();
+    setupCategoryDeleteCascade();
   </script>
 </body>
 </html>`;
@@ -571,7 +593,6 @@ async function handleAdminPost(req, tokenEnv) {
       const node = catalog.addCategory({
         parentPath: fields.parentPath,
         name: fields.name,
-        description: fields.description,
       });
       return pageHtml(tokenEnv, { ok: `Created category: ${node.name}`, activeTab: 'categories' });
     }
