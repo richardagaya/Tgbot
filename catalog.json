@@ -31,69 +31,43 @@
     {
       "id": "w2",
       "name": "📄 W2 forms",
-      "subs": [
-        {
-          "id": "shop",
-          "name": "Shop",
-          "subs": [
-            { "id": "items", "name": "W2 forms", "productIds": ["p1"] }
-          ]
-        }
-      ]
+      "productIds": ["p1"]
     },
     {
       "id": "docs",
       "name": "📑 Documents",
       "subs": [
         {
-          "id": "types",
-          "name": "Documents",
-          "subs": [
-            {
-              "id": "dl_psd",
-              "name": "DL Psd",
-              "description": "Professional PSD templates you can customize. Files are delivered digitally after purchase.",
-              "quantityAvailable": 50,
-              "productIds": ["p2"]
-            },
-            { "id": "utility", "name": "Utility bills", "productIds": [] },
-            { "id": "resume", "name": "Resume", "productIds": [] },
-            { "id": "answers", "name": "Assessment answers", "productIds": [] }
-          ]
-        }
+          "id": "dl_psd",
+          "name": "DL Psd",
+          "description": "Professional PSD templates you can customize. Files are delivered digitally after purchase.",
+          "quantityAvailable": 50,
+          "productIds": ["p2"]
+        },
+        { "id": "utility", "name": "Utility bills", "productIds": [] },
+        { "id": "resume", "name": "Resume", "productIds": [] },
+        { "id": "answers", "name": "Assessment answers", "productIds": [] }
       ]
     },
     {
       "id": "logins",
       "name": "🔐 Logins",
       "subs": [
-        {
-          "id": "accounts",
-          "name": "Logins",
-          "subs": [
-            { "id": "fb_usa", "name": "Fb usa", "productIds": [] },
-            { "id": "tt_usa", "name": "TT usa", "productIds": [] },
-            { "id": "edu_mails", "name": "Edu mails", "productIds": [] },
-            { "id": "netflix", "name": "Netflix", "productIds": [] }
-          ]
-        }
+        { "id": "fb_usa", "name": "Fb usa", "productIds": [] },
+        { "id": "tt_usa", "name": "TT usa", "productIds": [] },
+        { "id": "edu_mails", "name": "Edu mails", "productIds": [] },
+        { "id": "netflix", "name": "Netflix", "productIds": [] }
       ]
     },
     {
       "id": "fullz",
       "name": "FULLZ",
       "subs": [
-        {
-          "id": "fullz_types",
-          "name": "FULLZ",
-          "subs": [
-            { "id": "young", "name": "young fullz (2005-2009)", "productIds": [] },
-            { "id": "w_cs", "name": "Fullz W CS", "productIds": [] },
-            { "id": "fafsa", "name": "Fafsa fullz", "productIds": [] },
-            { "id": "old", "name": "old fullz", "productIds": [] },
-            { "id": "new", "name": "new fullz", "productIds": [] }
-          ]
-        }
+        { "id": "young", "name": "young fullz (2005-2009)", "productIds": [] },
+        { "id": "w_cs", "name": "Fullz W CS", "productIds": [] },
+        { "id": "fafsa", "name": "Fafsa fullz", "productIds": [] },
+        { "id": "old", "name": "old fullz", "productIds": [] },
+        { "id": "new", "name": "new fullz", "productIds": [] }
       ]
     }
   ]
