@@ -3,6 +3,9 @@ const os = require('os');
 const path = require('path');
 const Busboy = require('busboy');
 const catalog = require('./catalog');
+const auth = require('./admin-auth');
+const { renderAdminDashboard } = require('./admin-dashboard');
+const { renderSellerDashboard } = require('./seller-dashboard');
 
 const ADMIN_PATH = '/admin/catalog';
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -13,6 +16,11 @@ function esc(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function redirectToAdmin(res, headers = {}) {
+  res.writeHead(303, { Location: ADMIN_PATH, ...headers });
+  res.end();
 }
 
 function ensureDir(dir) {
@@ -122,11 +130,16 @@ function inventoryCount(product) {
     .readdirSync(folder)
     .filter((name) => !name.startsWith('.') && name !== '_sold')
     .map((name) => path.join(folder, name))
-    .filter((fp) => fs.statSync(fp).isFile()).length;
+    .filter((fp) => fs.statSync(fp).isFile() && fp.toLowerCase().endsWith('.zip')).length;
 }
 
 function moveInventoryFiles(product, files, { replace = false } = {}) {
   if (!files || files.length === 0) return { patch: {}, count: 0 };
+  for (const f of files) {
+    if (!String(f.originalName || '').toLowerCase().endsWith('.zip')) {
+      throw new Error('Only .zip files can be uploaded');
+    }
+  }
   const destDir = path.join(UPLOADS_DIR, product.id, 'inventory');
   if (replace && fs.existsSync(destDir)) {
     for (const name of fs.readdirSync(destDir)) {
@@ -191,17 +204,83 @@ function renderRecentProducts(limit = 10) {
           return node ? node.label : pathKey;
         })
         .join('<br>') || '<span class="muted">Not shown in shop</span>';
-      return `<tr><td><code>${esc(p.id)}</code><br>${esc(p.name)}</td><td>${locations}</td><td>$${Number(
+      return `<tr><td><code>${esc(p.id)}</code><br>${esc(p.name)}<br><span class="muted">seller: ${esc(
+        p.sellerUsername || 'admin'
+      )}</span></td><td>${locations}</td><td>$${Number(
         p.price
       ).toFixed(2)}</td><td>${inventoryCount(p)} file(s)</td><td>${esc(p.description || '')}</td></tr>`;
     })
     .join('\n')}</tbody></table>`;
 }
 
-function pageHtml(token, { ok, err, activeTab } = {}) {
+function renderAddCategoryCard() {
+  return `<section class="card">
+    <h2>Add Category</h2>
+    <form method="post" action="${ADMIN_PATH}">
+      <input type="hidden" name="action" value="add_category" />
+      <input type="hidden" name="parentPath" id="categoryParentPath" />
+      <label>Put New Category Inside</label>
+      <select id="categoryParentCat"></select>
+      <div id="categoryParentSubWrap">
+        <label>Sub Category</label>
+        <select id="categoryParentSub"></select>
+      </div>
+      <div id="categoryParentSubSubWrap">
+        <label>Sub Sub Category</label>
+        <select id="categoryParentSubSub"></select>
+      </div>
+      <p class="hint" id="categoryParentHint"></p>
+      <label>New Category Name</label>
+      <input name="name" required maxlength="120" placeholder="Example: Utility bills" />
+      <button type="submit">Create Category</button>
+    </form>
+  </section>`;
+}
+
+function loginHtml({ err } = {}) {
+  const banner = err ? `<p class="err">${esc(err)}</p>` : '';
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shop Admin Login</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 28rem; margin: 5rem auto; padding: 0 1rem; background: #f6f7f9; color: #151515; }
+    h1 { margin: 0 0 0.25rem; font-size: 1.8rem; }
+    label { display: block; margin-top: 0.75rem; font-weight: 700; font-size: 0.88rem; }
+    input { width: 100%; box-sizing: border-box; margin-top: 0.3rem; padding: 0.7rem; border: 1px solid #d1d5db; border-radius: 12px; font: inherit; background: white; }
+    button { width: 100%; margin-top: 1rem; padding: 0.72rem 1.1rem; border: 0; border-radius: 999px; background: #111827; color: white; font: inherit; font-weight: 800; cursor: pointer; }
+    .card { background: white; border: 1px solid #e5e7eb; border-radius: 18px; padding: 1rem; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .muted { color: #667085; font-size: 0.9rem; }
+    .err { background: #fef3f2; border: 1px solid #fecdca; padding: 0.85rem 1rem; border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <section class="card">
+    <h1>Shop Admin Login</h1>
+    <p class="muted">Sign in as an admin or seller.</p>
+    ${banner}
+    <form method="post" action="${ADMIN_PATH}">
+      <input type="hidden" name="action" value="login" />
+      <label>Username</label>
+      <input name="username" required autocomplete="username" />
+      <label>Password</label>
+      <input name="password" type="password" required autocomplete="current-password" />
+      <button type="submit">Sign In</button>
+    </form>
+  </section>
+</body>
+</html>`;
+}
+
+function pageHtml(session, { ok, err, activeTab } = {}) {
   const banner = ok ? `<p class="ok">${esc(ok)}</p>` : err ? `<p class="err">${esc(err)}</p>` : '';
   const storeJson = jsonForScript(catalog.getStore());
-  const tab = ['add-file', 'categories', 'recent'].includes(activeTab) ? activeTab : 'add-file';
+  const isAdmin = session.role === 'admin';
+  const allowedTabs = isAdmin ? ['dashboard', 'add-file', 'categories', 'recent'] : ['dashboard', 'add-file', 'recent'];
+  const tab = allowedTabs.includes(activeTab) ? activeTab : 'dashboard';
+  const dashboard = isAdmin ? renderAdminDashboard() : renderSellerDashboard(session, renderAddCategoryCard());
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -230,6 +309,14 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
     .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.75rem; margin: 0.75rem 0; }
+    .metric { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 14px; padding: 0.85rem; }
+    .metric strong { display: block; font-size: 1.35rem; }
+    .metric span { color: #667085; font-size: 0.85rem; }
+    .inline-form { margin: 0; }
+    .seller-form { max-width: 26rem; }
+    .small-btn { margin: 0; padding: 0.45rem 0.7rem; font-size: 0.82rem; }
+    .err-inline { color: #b42318; font-size: 0.85rem; font-weight: 700; }
     .muted { color: #667085; font-size: 0.9rem; }
     .hint { color: #667085; font-size: 0.82rem; margin-top: 0.35rem; }
     .ok { background: #ecfdf3; border: 1px solid #abefc6; padding: 0.85rem 1rem; border-radius: 12px; }
@@ -241,20 +328,26 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
 </head>
 <body>
   <h1>Shop Admin</h1>
-  <p class="muted">Add files, choose exactly where they appear in the shop, and manage categories from one simple page.</p>
+  <p class="muted">Signed in as <strong>${esc(session.username)}</strong> (${esc(session.role)}). Add files, choose exactly where they appear in the shop, and manage categories from one simple page.</p>
+  <form method="post" action="${ADMIN_PATH}" style="margin:0 0 1rem">
+    <input type="hidden" name="action" value="logout" />
+    <button type="submit" class="tab-btn">Log Out</button>
+  </form>
   <p class="warn"><strong>Railway:</strong> add a persistent volume or uploads/catalog changes may disappear after redeploys.</p>
   ${banner}
 
   <div class="tabs">
+    <button type="button" class="tab-btn ${tab === 'dashboard' ? 'active' : ''}" data-tab="dashboard">Dashboard</button>
     <button type="button" class="tab-btn ${tab === 'add-file' ? 'active' : ''}" data-tab="add-file">Add File</button>
-    <button type="button" class="tab-btn ${tab === 'categories' ? 'active' : ''}" data-tab="categories">Categories</button>
+    ${isAdmin ? `<button type="button" class="tab-btn ${tab === 'categories' ? 'active' : ''}" data-tab="categories">Categories</button>` : ''}
     <button type="button" class="tab-btn ${tab === 'recent' ? 'active' : ''}" data-tab="recent">Recently Added</button>
   </div>
+
+  ${dashboard.replace('tab-panel active', `tab-panel ${tab === 'dashboard' ? 'active' : ''}`)}
 
   <section class="card tab-panel ${tab === 'add-file' ? 'active' : ''}" id="tab-add-file">
     <h2>Add File</h2>
     <form method="post" action="${ADMIN_PATH}" enctype="multipart/form-data">
-      <input type="hidden" name="token" value="${esc(token)}" />
       <input type="hidden" name="action" value="add_product" />
       <input type="hidden" name="leaf" id="productLeaf" />
       <label>Category</label>
@@ -275,41 +368,21 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
       <label>Price Per File (USD)</label>
       <input name="price" type="number" min="0" step="0.01" required placeholder="9.99" />
       <label>Upload File</label>
-      <input name="files" type="file" multiple required />
-      <p class="hint">Quantity is automatic: each uploaded document becomes one available item.</p>
+      <input name="files" type="file" accept=".zip,application/zip" multiple required />
+      <p class="hint">Only ZIP files are accepted. Quantity is automatic: each uploaded ZIP becomes one available item.</p>
       <button type="submit">Upload File</button>
     </form>
   </section>
 
-  <section class="tab-panel ${tab === 'categories' ? 'active' : ''}" id="tab-categories">
+  ${
+    isAdmin
+      ? `<section class="tab-panel ${tab === 'categories' ? 'active' : ''}" id="tab-categories">
     <div class="two">
-      <section class="card">
-        <h2>Add Category</h2>
-        <form method="post" action="${ADMIN_PATH}">
-          <input type="hidden" name="token" value="${esc(token)}" />
-          <input type="hidden" name="action" value="add_category" />
-          <input type="hidden" name="parentPath" id="categoryParentPath" />
-          <label>Put New Category Inside</label>
-          <select id="categoryParentCat"></select>
-          <div id="categoryParentSubWrap">
-            <label>Sub Category</label>
-            <select id="categoryParentSub"></select>
-          </div>
-          <div id="categoryParentSubSubWrap">
-            <label>Sub Sub Category</label>
-            <select id="categoryParentSubSub"></select>
-          </div>
-          <p class="hint" id="categoryParentHint"></p>
-          <label>New Category Name</label>
-          <input name="name" required maxlength="120" placeholder="Example: Utility bills" />
-          <button type="submit">Create Category</button>
-        </form>
-      </section>
+      ${renderAddCategoryCard()}
 
       <section class="card">
         <h2>Modify Category</h2>
         <form method="post" action="${ADMIN_PATH}">
-          <input type="hidden" name="token" value="${esc(token)}" />
           <input type="hidden" name="action" value="update_category" />
           <label>Current Category</label>
           <select name="path" id="editCategoryPath" required>${categoryEditOptions()}</select>
@@ -324,7 +397,6 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
       <section class="card">
         <h2>Delete Category</h2>
         <form method="post" action="${ADMIN_PATH}" id="deleteCategoryForm">
-          <input type="hidden" name="token" value="${esc(token)}" />
           <input type="hidden" name="action" value="delete_category" />
           <input type="hidden" name="path" id="deleteCategoryPath" />
           <label>Category</label>
@@ -342,7 +414,9 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
         </form>
       </section>
     </div>
-  </section>
+  </section>`
+      : ''
+  }
 
   <section class="card tab-panel ${tab === 'recent' ? 'active' : ''}" id="tab-recent">
     <h2>Recently Added</h2>
@@ -455,6 +529,7 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
       const subSubWrap = document.getElementById('categoryParentSubSubWrap');
       const hidden = document.getElementById('categoryParentPath');
       const hint = document.getElementById('categoryParentHint');
+      if (!cat || !sub || !subSub || !hidden || !hint) return;
 
       function refresh() {
         const catPath = selectedPath(['categoryParentCat']);
@@ -510,6 +585,7 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
       const hidden = document.getElementById('deleteCategoryPath');
       const hint = document.getElementById('deleteCategoryHint');
       const deleteForm = document.getElementById('deleteCategoryForm');
+      if (!cat || !sub || !subSub || !hidden || !hint || !deleteForm) return;
 
       function refresh() {
         const catPath = selectedPath(['deleteCategoryCat']);
@@ -565,10 +641,6 @@ function pageHtml(token, { ok, err, activeTab } = {}) {
 </html>`;
 }
 
-function assertToken(token, expected) {
-  if (token !== expected) throw new Error('Unauthorized');
-}
-
 async function parsePost(req) {
   const ct = (req.headers['content-type'] || '').split(';')[0].trim();
   if (ct === 'multipart/form-data') return readMultipart(req);
@@ -582,19 +654,31 @@ async function parsePost(req) {
   throw new Error('Unsupported form type');
 }
 
-async function handleAdminPost(req, tokenEnv) {
+function assertAdmin(session) {
+  if (!session || session.role !== 'admin') throw new Error('Only admins can do that');
+}
+
+async function handleAdminPost(req, session) {
   let parsed = { fields: {}, files: [] };
   try {
-    parsed = await parsePost(req);
+    parsed = req.parsedAdminPost || (await parsePost(req));
     const { fields, files } = parsed;
-    assertToken(fields.token || '', tokenEnv);
 
     if (fields.action === 'add_category') {
       const node = catalog.addCategory({
         parentPath: fields.parentPath,
         name: fields.name,
       });
-      return pageHtml(tokenEnv, { ok: `Created category: ${node.name}`, activeTab: 'categories' });
+      auth.recordActivity({
+        actor: session.username,
+        role: session.role,
+        action: 'add_category',
+        detail: `Created category: ${node.name}`,
+      });
+      return pageHtml(session, {
+        ok: `Created category: ${node.name}`,
+        activeTab: session.role === 'admin' ? 'categories' : 'dashboard',
+      });
     }
 
     if (fields.action === 'add_product') {
@@ -607,24 +691,63 @@ async function handleAdminPost(req, tokenEnv) {
         name: fields.name,
         description: fields.description,
         price: fields.price,
+        sellerUsername: session.username,
+        createdByRole: session.role,
+        createdAt: new Date().toISOString(),
       });
       const moved = moveInventoryFiles(product, files);
       catalog.updateProduct(product.id, moved.patch);
       catalog.updateStoreNode(fields.leaf, { description: fields.description, quantityAvailable: moved.count });
-      return pageHtml(tokenEnv, { ok: `Created ${product.name} with ${moved.count} available file(s)`, activeTab: 'recent' });
+      auth.recordActivity({
+        actor: session.username,
+        role: session.role,
+        action: 'add_product',
+        detail: `Uploaded ${moved.count} ZIP file(s) for ${product.name}`,
+      });
+      return pageHtml(session, { ok: `Created ${product.name} with ${moved.count} available file(s)`, activeTab: 'recent' });
     }
 
     if (fields.action === 'update_category') {
+      assertAdmin(session);
       const node = catalog.updateStoreNode(fields.path, {
         name: fields.name,
         description: fields.description,
       });
-      return pageHtml(tokenEnv, { ok: `Updated category: ${node.name}`, activeTab: 'categories' });
+      auth.recordActivity({
+        actor: session.username,
+        role: session.role,
+        action: 'update_category',
+        detail: `Updated category: ${node.name}`,
+      });
+      return pageHtml(session, { ok: `Updated category: ${node.name}`, activeTab: 'categories' });
     }
 
     if (fields.action === 'delete_category') {
+      assertAdmin(session);
       const node = catalog.deleteStoreNode(fields.path);
-      return pageHtml(tokenEnv, { ok: `Deleted category: ${node.name}`, activeTab: 'categories' });
+      auth.recordActivity({
+        actor: session.username,
+        role: session.role,
+        action: 'delete_category',
+        detail: `Deleted category: ${node.name}`,
+      });
+      return pageHtml(session, { ok: `Deleted category: ${node.name}`, activeTab: 'categories' });
+    }
+
+    if (fields.action === 'revoke_seller') {
+      assertAdmin(session);
+      auth.revokeSeller(fields.username, session.username);
+      return pageHtml(session, { ok: `Revoked seller access: ${fields.username}`, activeTab: 'dashboard' });
+    }
+
+    if (fields.action === 'create_seller') {
+      assertAdmin(session);
+      const seller = auth.createSeller({
+        username: fields.username,
+        password: fields.password,
+        actor: session.username,
+      });
+      return pageHtml(session, { ok: `Created seller account: ${seller.username}`, activeTab: 'dashboard' });
     }
 
     if (fields.action === 'upload_product_file') {
@@ -636,13 +759,13 @@ async function handleAdminPost(req, tokenEnv) {
       for (const pathKey of productLocationPaths(product.id)) {
         catalog.updateStoreNode(pathKey, { quantityAvailable: moved.count });
       }
-      return pageHtml(tokenEnv, { ok: `Updated ${product.name}: ${moved.count} available file(s)`, activeTab: 'recent' });
+      return pageHtml(session, { ok: `Updated ${product.name}: ${moved.count} available file(s)`, activeTab: 'recent' });
     }
 
     throw new Error('Unknown action');
   } catch (e) {
     cleanupFiles(parsed.files);
-    return pageHtml(tokenEnv, { err: e.message || String(e) });
+    return pageHtml(session, { err: e.message || String(e) });
   }
 }
 
@@ -656,27 +779,56 @@ async function tryHandleCatalogAdmin(req, res) {
   }
   if (pathname !== ADMIN_PATH) return false;
 
-  const tokenEnv = process.env.ADMIN_CATALOG_TOKEN;
-  if (!tokenEnv || String(tokenEnv).trim() === '') {
+  if (!auth.configuredUsers().length) {
     res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<p>Catalog admin is off. Set <code>ADMIN_CATALOG_TOKEN</code> in your environment and restart the bot.</p>');
+    res.end(
+      '<p>Catalog admin auth is off. Set <code>ADMIN_PASSWORD</code> or <code>ADMIN_CATALOG_TOKEN</code> in your environment and restart the bot.</p>'
+    );
     return true;
   }
 
+  const session = auth.readSession(req);
+
   if (req.method === 'GET') {
-    const u = new URL(req.url || '/', `http://${host}`);
-    if ((u.searchParams.get('token') || '') !== tokenEnv) {
-      res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<p>Unauthorized. Open this URL with <code>?token=</code> matching your <code>ADMIN_CATALOG_TOKEN</code>.</p>');
+    if (!session) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(loginHtml({}));
       return true;
     }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(pageHtml(tokenEnv, {}));
+    res.end(pageHtml(session, {}));
     return true;
   }
 
   if (req.method === 'POST') {
-    const html = await handleAdminPost(req, tokenEnv);
+    const parsed = await parsePost(req);
+    const action = parsed.fields.action;
+
+    if (action === 'login') {
+      const user = auth.findUser(parsed.fields.username, parsed.fields.password);
+      if (!user) {
+        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(loginHtml({ err: 'Invalid username or password' }));
+        return true;
+      }
+      redirectToAdmin(res, { 'Set-Cookie': auth.authCookieHeader(auth.createSessionCookie(user)) });
+      return true;
+    }
+
+    if (action === 'logout') {
+      redirectToAdmin(res, { 'Set-Cookie': auth.clearAuthCookieHeader() });
+      return true;
+    }
+
+    if (!session) {
+      cleanupFiles(parsed.files);
+      res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(loginHtml({ err: 'Please sign in again' }));
+      return true;
+    }
+
+    req.parsedAdminPost = parsed;
+    const html = await handleAdminPost(req, session);
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
     return true;

@@ -332,7 +332,7 @@ function productInventoryFiles(product) {
   if (!st.isDirectory()) return null;
   return fs
     .readdirSync(folder)
-    .filter((name) => !name.startsWith('.'))
+    .filter((name) => !name.startsWith('.') && name.toLowerCase().endsWith('.zip'))
     .map((name) => path.join(folder, name))
     .filter((fp) => fs.statSync(fp).isFile())
     .sort();
@@ -953,6 +953,8 @@ bot.on('callback_query', async (query) => {
     db.orders.push({
       userId,
       productId: pend.productId,
+      productName: product.name,
+      sellerUsername: product.sellerUsername || 'admin',
       price: total,
       qty: pend.qty,
       date: new Date().toISOString(),
@@ -1017,7 +1019,15 @@ bot.on('callback_query', async (query) => {
     updateUser(userId, user);
 
     const db = loadDB();
-    db.orders.push({ userId, productId, price: product.price, date: new Date().toISOString() });
+    db.orders.push({
+      userId,
+      productId,
+      productName: product.name,
+      sellerUsername: product.sellerUsername || 'admin',
+      price: product.price,
+      qty: 1,
+      date: new Date().toISOString(),
+    });
     saveDB(db);
 
     await bot.sendMessage(chatId, `🎉 *Purchase successful!*\n\n${product.name}\n\nDelivering your file now...`, { parse_mode: 'Markdown' });
@@ -1208,6 +1218,15 @@ function zipFolderToTempZip(absFolder, productId) {
   });
 }
 
+function syncProductStock(productId, count) {
+  for (const node of catalog.listStoreNodes()) {
+    const hit = catalog.resolveStoreNode(node.path);
+    if (hit?.node && (hit.node.productIds || []).includes(productId)) {
+      catalog.updateStoreNode(node.path, { quantityAvailable: count });
+    }
+  }
+}
+
 async function deliverPurchasedFiles(chatId, product, qty = 1) {
   const inventory = productInventoryFiles(product);
   if (!inventory) return deliverFile(chatId, product);
@@ -1222,8 +1241,6 @@ async function deliverPurchasedFiles(chatId, product, qty = 1) {
   }
 
   const selected = inventory.slice(0, count);
-  const soldDir = path.join(path.dirname(selected[0]), '_sold');
-  ensureDeliveryDir(soldDir);
 
   for (let i = 0; i < selected.length; i += 1) {
     const fp = selected[i];
@@ -1232,22 +1249,18 @@ async function deliverPurchasedFiles(chatId, product, qty = 1) {
       parse_mode: 'Markdown',
     }, {
       filename: path.basename(fp),
-      contentType: 'application/octet-stream',
+      contentType: 'application/zip',
     });
-    const soldPath = path.join(soldDir, `${Date.now()}-${path.basename(fp)}`);
-    fs.renameSync(fp, soldPath);
+    fs.unlinkSync(fp);
   }
+
+  syncProductStock(product.id, Math.max(0, inventory.length - selected.length));
 
   return null;
 }
 
-function ensureDeliveryDir(dir) {
-  fs.mkdirSync(dir, { recursive: true });
-}
-
 async function deliverFile(chatId, product) {
   const captionZip = `📥 *${product.name}*\n\nThank you for your purchase — your files are in the ZIP below.`;
-  const captionFile = `📥 *${product.name}*\n\nThank you for your purchase!`;
   let tempZip = null;
   try {
     const deliveryZip = resolveProductFsPath(product.deliveryZipPath);
@@ -1287,28 +1300,28 @@ async function deliverFile(chatId, product) {
       }
     }
 
-    if (product.fileId) {
-      return bot.sendDocument(chatId, product.fileId, {
-        caption: captionFile,
-        parse_mode: 'Markdown',
-      });
-    }
-
     const fp = resolveProductFsPath(product.filePath);
     if (fp && fs.existsSync(fp)) {
       const isZip = fp.toLowerCase().endsWith('.zip');
+      if (!isZip) {
+        return bot.sendMessage(
+          chatId,
+          `📥 *${product.name}*\n\n⚠️ This product is not a ZIP yet. Ask the admin or seller to upload a ZIP file.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
       return bot.sendDocument(chatId, fs.createReadStream(fp), {
-        caption: isZip ? captionZip : captionFile,
+        caption: captionZip,
         parse_mode: 'Markdown',
       }, {
         filename: path.basename(fp),
-        contentType: isZip ? 'application/zip' : 'application/octet-stream',
+        contentType: 'application/zip',
       });
     }
 
     return bot.sendMessage(
       chatId,
-      `📥 *${product.name}*\n\n⚠️ Nothing to send yet. In \`catalog.json\` set one of:\n• \`deliveryFolder\` — folder of files (sent as a ZIP)\n• \`deliveryZipPath\` — ready-made .zip file\n• \`filePath\` — single file\n\nYour purchase is still recorded ✅`,
+      `📥 *${product.name}*\n\n⚠️ Nothing to send yet. Upload a ready-made .zip file for this listing.\n\nYour purchase is still recorded ✅`,
       { parse_mode: 'Markdown' }
     );
   } catch (e) {

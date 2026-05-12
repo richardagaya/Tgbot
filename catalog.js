@@ -91,6 +91,9 @@ function normalizeProduct(p) {
     deliveryZipPath: p.deliveryZipPath == null || p.deliveryZipPath === '' ? null : String(p.deliveryZipPath),
     /** Folder of individual stock documents; one file is delivered per quantity purchased. */
     inventoryFolder: p.inventoryFolder == null || p.inventoryFolder === '' ? null : String(p.inventoryFolder),
+    sellerUsername: p.sellerUsername == null || p.sellerUsername === '' ? null : String(p.sellerUsername),
+    createdByRole: p.createdByRole == null || p.createdByRole === '' ? null : String(p.createdByRole),
+    createdAt: p.createdAt == null || p.createdAt === '' ? null : String(p.createdAt),
   };
 }
 
@@ -274,7 +277,20 @@ function appendProductToLeaf(store, catId, subId, subsubId, productId) {
  * @param {{ name: string, description: string, price: number|string, leaf: string }} opts leaf = "catId:subId:subsubId"
  */
 function addProduct(opts) {
-  const { name, description, price, leaf, fileId, filePath, deliveryFolder, deliveryZipPath, inventoryFolder } = opts;
+  const {
+    name,
+    description,
+    price,
+    leaf,
+    fileId,
+    filePath,
+    deliveryFolder,
+    deliveryZipPath,
+    inventoryFolder,
+    sellerUsername,
+    createdByRole,
+    createdAt,
+  } = opts;
   const parts = splitPath(leaf);
   if (!parts.length) throw new Error('Choose where this product should appear');
 
@@ -290,6 +306,9 @@ function addProduct(opts) {
     deliveryFolder,
     deliveryZipPath,
     inventoryFolder,
+    sellerUsername,
+    createdByRole,
+    createdAt,
   });
   cat.products.push(product);
   appendProductToPath(cat.store, parts, id);
