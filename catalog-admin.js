@@ -133,6 +133,35 @@ function inventoryCount(product) {
     .filter((fp) => fs.statSync(fp).isFile() && fp.toLowerCase().endsWith('.zip')).length;
 }
 
+function productDeliveryLabel(product) {
+  if (product.deliveryZipPath) return 'Reusable ZIP';
+  if (product.inventoryFolder) return `${inventoryCount(product)} stock file(s)`;
+  return 'No file';
+}
+
+function moveDeliveryZipFile(product, files, { replace = false } = {}) {
+  if (!files || files.length !== 1) throw new Error('Upload exactly one ZIP for reusable or single-sale files');
+  const [file] = files;
+  if (!String(file.originalName || '').toLowerCase().endsWith('.zip')) {
+    throw new Error('Only .zip files can be uploaded');
+  }
+  const destDir = path.join(UPLOADS_DIR, product.id, 'delivery');
+  if (replace && fs.existsSync(destDir)) {
+    fs.rmSync(destDir, { recursive: true, force: true });
+  }
+  ensureDir(destDir);
+  const dest = path.join(destDir, file.originalName);
+  fs.renameSync(file.tempPath, dest);
+  return {
+    patch: {
+      deliveryZipPath: relativeProjectPath(dest),
+      filePath: null,
+      deliveryFolder: null,
+      inventoryFolder: null,
+    },
+  };
+}
+
 function moveInventoryFiles(product, files, { replace = false } = {}) {
   if (!files || files.length === 0) return { patch: {}, count: 0 };
   for (const f of files) {
@@ -196,7 +225,7 @@ function renderRecentProducts(limit = 10) {
     .slice(0, limit);
   if (!products.length) return '<p class="muted">No files have been added yet.</p>';
 
-  return `<table><thead><tr><th>File</th><th>Category</th><th>Price</th><th>Uploaded</th><th>Description</th></tr></thead><tbody>${products
+  return `<table><thead><tr><th>File</th><th>Category</th><th>Price</th><th>Type</th><th>Delivery</th><th>Description</th></tr></thead><tbody>${products
     .map((p) => {
       const locations = productLocationPaths(p.id)
         .map((pathKey) => {
@@ -208,7 +237,9 @@ function renderRecentProducts(limit = 10) {
         p.sellerUsername || 'admin'
       )}</span></td><td>${locations}</td><td>$${Number(
         p.price
-      ).toFixed(2)}</td><td>${inventoryCount(p)} file(s)</td><td>${esc(p.description || '')}</td></tr>`;
+      ).toFixed(2)}</td><td>${esc(p.purchaseType || 'reusable')}</td><td>${esc(productDeliveryLabel(p))}</td><td>${esc(
+        p.description || ''
+      )}</td></tr>`;
     })
     .join('\n')}</tbody></table>`;
 }
@@ -367,9 +398,15 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
       <textarea name="description" maxlength="2000" placeholder="Explain what this file contains"></textarea>
       <label>Price Per File (USD)</label>
       <input name="price" type="number" min="0" step="0.01" required placeholder="9.99" />
+      <label>Purchase Type</label>
+      <select name="purchaseType">
+        <option value="reusable">Reusable - every user can buy the same file</option>
+        <option value="single">Single sale - first buyer only</option>
+        <option value="limited">Limited stock - one uploaded ZIP per sale</option>
+      </select>
       <label>Upload File</label>
       <input name="files" type="file" accept=".zip,application/zip" multiple required />
-      <p class="hint">Only ZIP files are accepted. Quantity is automatic: each uploaded ZIP becomes one available item.</p>
+      <p class="hint">Reusable and single-sale products use one ZIP. Limited stock products use one ZIP per available item.</p>
       <button type="submit">Upload File</button>
     </form>
   </section>
@@ -686,25 +723,34 @@ async function handleAdminPost(req, session) {
       const target = catalog.resolveStoreNode(fields.leaf);
       if (!target || !target.node) throw new Error('Choose a category for this file');
       if ((target.children || []).length) throw new Error('Choose the lowest category level before uploading the file');
+      const purchaseType = ['single', 'limited'].includes(fields.purchaseType) ? fields.purchaseType : 'reusable';
       const product = catalog.addProduct({
         leaf: fields.leaf,
         name: fields.name,
         description: fields.description,
         price: fields.price,
+        purchaseType,
         sellerUsername: session.username,
         createdByRole: session.role,
         createdAt: new Date().toISOString(),
       });
-      const moved = moveInventoryFiles(product, files);
+      const moved =
+        purchaseType === 'limited'
+          ? moveInventoryFiles(product, files)
+          : moveDeliveryZipFile(product, files);
       catalog.updateProduct(product.id, moved.patch);
-      catalog.updateStoreNode(fields.leaf, { description: fields.description, quantityAvailable: moved.count });
+      catalog.updateStoreNode(fields.leaf, {
+        description: fields.description,
+        quantityAvailable: purchaseType === 'limited' ? moved.count : purchaseType === 'single' ? 1 : null,
+      });
       auth.recordActivity({
         actor: session.username,
         role: session.role,
         action: 'add_product',
-        detail: `Uploaded ${moved.count} ZIP file(s) for ${product.name}`,
+        detail: `Uploaded ${purchaseType} ZIP file(s) for ${product.name}`,
       });
-      return pageHtml(session, { ok: `Created ${product.name} with ${moved.count} available file(s)`, activeTab: 'recent' });
+      const availability = purchaseType === 'limited' ? `${moved.count} available file(s)` : purchaseType;
+      return pageHtml(session, { ok: `Created ${product.name} as ${availability}`, activeTab: 'recent' });
     }
 
     if (fields.action === 'update_category') {
@@ -754,12 +800,17 @@ async function handleAdminPost(req, session) {
       const product = catalog.findProduct(fields.productId);
       if (!product) throw new Error('Product not found');
       if (!files.length) throw new Error('Upload at least one delivery document');
-      const moved = moveInventoryFiles(product, files, { replace: true });
+      const moved =
+        product.purchaseType === 'limited'
+          ? moveInventoryFiles(product, files, { replace: true })
+          : moveDeliveryZipFile(product, files, { replace: true });
       catalog.updateProduct(product.id, moved.patch);
       for (const pathKey of productLocationPaths(product.id)) {
-        catalog.updateStoreNode(pathKey, { quantityAvailable: moved.count });
+        catalog.updateStoreNode(pathKey, {
+          quantityAvailable: product.purchaseType === 'limited' ? moved.count : product.purchaseType === 'single' ? 1 : null,
+        });
       }
-      return pageHtml(session, { ok: `Updated ${product.name}: ${moved.count} available file(s)`, activeTab: 'recent' });
+      return pageHtml(session, { ok: `Updated ${product.name}`, activeTab: 'recent' });
     }
 
     throw new Error('Unknown action');

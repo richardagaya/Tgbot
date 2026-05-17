@@ -10,6 +10,7 @@ const DEFAULT_CATALOG = {
       name: '📘 Sample product',
       description: 'Replace in catalog.json or use the admin page.',
       price: 1,
+      purchaseType: 'reusable',
       fileId: null,
       filePath: null,
     },
@@ -76,6 +77,13 @@ function invalidateCatalogCache() {
   cacheMtime = 0;
 }
 
+function normalizePurchaseType(p) {
+  const value = String(p.purchaseType || '').trim().toLowerCase();
+  if (value === 'single' || value === 'reusable' || value === 'limited') return value;
+  if (value === 'stock' || value === 'consumable') return 'limited';
+  return p.inventoryFolder ? 'limited' : 'reusable';
+}
+
 function normalizeProduct(p) {
   const price = Number.parseFloat(p.price);
   return {
@@ -83,6 +91,7 @@ function normalizeProduct(p) {
     name: String(p.name || '').trim(),
     description: String(p.description || '').trim(),
     price: Number.isFinite(price) ? Math.round(price * 100) / 100 : 0,
+    purchaseType: normalizePurchaseType(p),
     fileId: p.fileId == null || p.fileId === '' ? null : String(p.fileId),
     filePath: p.filePath == null || p.filePath === '' ? null : String(p.filePath),
     /** Folder on disk (relative to project or absolute) — zipped and sent on purchase. */
@@ -287,6 +296,7 @@ function addProduct(opts) {
     deliveryFolder,
     deliveryZipPath,
     inventoryFolder,
+    purchaseType,
     sellerUsername,
     createdByRole,
     createdAt,
@@ -306,6 +316,7 @@ function addProduct(opts) {
     deliveryFolder,
     deliveryZipPath,
     inventoryFolder,
+    purchaseType,
     sellerUsername,
     createdByRole,
     createdAt,

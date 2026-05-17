@@ -123,21 +123,12 @@ const START_BANNER_PATH = path.join(__dirname, 'assets', 'Market.png');
 const MIN_DEPOSIT = 10; // USD — minimum deposit amount in the bot
 
 // ─── NOWPayments API ──────────────────────────────────────────────────────────
-// Production: https://api.nowpayments.io/v1 — Sandbox: https://api-sandbox.nowpayments.io/v1
-// Create a sandbox account at https://account.sandbox.nowpayments.io and generate a sandbox API key.
 function resolveNowPaymentsHost() {
   const explicit = process.env.NOWPAYMENTS_API_HOST;
   if (explicit && explicit.trim()) return explicit.trim();
-  const sb = process.env.NOWPAYMENTS_SANDBOX;
-  if (sb === '1' || sb === 'true' || sb === 'yes') return 'api-sandbox.nowpayments.io';
   return 'api.nowpayments.io';
 }
 const NOWPAYMENTS_API_HOST = resolveNowPaymentsHost();
-
-/** Sandbox API simulates flows; real crypto is not required when `case` is set (see createNowPayment). */
-function isNowPaymentsSandbox() {
-  return NOWPAYMENTS_API_HOST.includes('sandbox');
-}
 
 const DEPOSIT_CURRENCIES = [
   { label: 'USDT (TRC20)', value: 'usdttrc20' },
@@ -192,11 +183,6 @@ async function createNowPayment(userId, usdAmount, currency) {
     is_fixed_rate: false,
     is_fee_paid_by_user: true,
   };
-  // Sandbox only: simulates payment outcome without sending crypto (Postman: "case" on POST /payment).
-  if (isNowPaymentsSandbox()) {
-    const c = process.env.NOWPAYMENTS_SANDBOX_CASE;
-    body.case = c && String(c).trim() ? String(c).trim() : 'success';
-  }
   return nowPaymentsRequest('POST', '/payment', body);
 }
 
@@ -294,7 +280,7 @@ async function checkPendingPayments() {
   }
 }
 
-const PAYMENT_POLL_MS = isNowPaymentsSandbox() ? 15 * 1000 : 60 * 1000;
+const PAYMENT_POLL_MS = 60 * 1000;
 setInterval(checkPendingPayments, PAYMENT_POLL_MS);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -338,18 +324,39 @@ function productInventoryFiles(product) {
     .sort();
 }
 
+function productSoldQty(productId) {
+  const db = loadDB();
+  return (db.orders || [])
+    .filter((order) => order.productId === productId)
+    .reduce((sum, order) => sum + Math.max(1, Math.floor(Number(order.qty) || 1)), 0);
+}
+
+function isSinglePurchaseProduct(product) {
+  return product?.purchaseType === 'single';
+}
+
+function isLimitedStockProduct(product) {
+  return product?.purchaseType === 'limited';
+}
+
+function isSoldOutProduct(product) {
+  return isSinglePurchaseProduct(product) && productSoldQty(product.id) > 0;
+}
+
 /** Current units available for this section (null = unlimited). Synced in db.sectionStock. */
 function getSectionStock(pathKey) {
   const db = loadDB();
   if (!db.sectionStock) db.sectionStock = {};
-  if (Object.prototype.hasOwnProperty.call(db.sectionStock, pathKey)) {
-    const v = db.sectionStock[pathKey];
-    return v === null ? null : v;
-  }
   const hit = getLeafFromPathKey(pathKey);
   if (!hit) return 0;
   const productId = (hit.r.productIds || [])[0];
   const product = productId ? catalog.findProduct(productId) : null;
+  if (isSinglePurchaseProduct(product)) return isSoldOutProduct(product) ? 0 : 1;
+  if (product && !isLimitedStockProduct(product)) return null;
+  if (Object.prototype.hasOwnProperty.call(db.sectionStock, pathKey)) {
+    const v = db.sectionStock[pathKey];
+    return v === null ? null : v;
+  }
   const inventory = product ? productInventoryFiles(product) : null;
   if (inventory) return inventory.length;
   const qa = hit.r.node.quantityAvailable;
@@ -374,6 +381,8 @@ function decrementSectionStock(pathKey, qty) {
   const hit = getLeafFromPathKey(pathKey);
   const productId = hit ? (hit.r.productIds || [])[0] : null;
   const product = productId ? catalog.findProduct(productId) : null;
+  if (isSinglePurchaseProduct(product)) return qty <= 1 && !isSoldOutProduct(product);
+  if (product && !isLimitedStockProduct(product)) return true;
   const inventory = product ? productInventoryFiles(product) : null;
   if (inventory) return inventory.length >= qty;
 
@@ -504,6 +513,8 @@ function sendLeafQtyIntro(chatId, parts, userId) {
     (node.description && String(node.description).trim()) ||
     product.description ||
     'No description yet.';
+  const user = getUser(userId);
+  const alreadyBought = (user.purchases || []).includes(product.id);
   const stockLine =
     stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
 
@@ -518,6 +529,38 @@ function sendLeafQtyIntro(chatId, parts, userId) {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [[{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }]],
+      },
+    });
+  }
+
+  if (alreadyBought && !isLimitedStockProduct(product)) {
+    body += '✅ You already own this file. You can download it again from your purchases.';
+    updateUser(userId, { state: null, qtyLeafPath: null, pendingSectionPurchase: null });
+    return bot.sendMessage(chatId, body, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📥 Download Again', callback_data: `download_${product.id}` }],
+          [{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }],
+        ],
+      },
+    });
+  }
+
+  if (!isLimitedStockProduct(product)) {
+    updateUser(userId, {
+      state: 'awaiting_section_confirm',
+      qtyLeafPath: null,
+      pendingSectionPurchase: { pathKey, qty: 1, productId: product.id },
+    });
+    body += 'Tap confirm to buy this file.';
+    return bot.sendMessage(chatId, body, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `✅ Buy Now — ${formatBalance(product.price)}`, callback_data: 'section_confirm_buy' }],
+          [{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }],
+        ],
       },
     });
   }
@@ -555,6 +598,21 @@ function handleSectionQtyMessage(chatId, userId, text, user) {
   if (!product) {
     updateUser(userId, { state: null, qtyLeafPath: null });
     return bot.sendMessage(chatId, '⚠️ Product not found.');
+  }
+  if (!isLimitedStockProduct(product)) {
+    updateUser(userId, {
+      state: 'awaiting_section_confirm',
+      qtyLeafPath: null,
+      pendingSectionPurchase: { pathKey, qty: 1, productId },
+    });
+    return bot.sendMessage(chatId, 'ℹ️ This file is bought once per order. Tap confirm to continue.', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `✅ Buy Now — ${formatBalance(product.price)}`, callback_data: 'section_confirm_buy' }],
+          [{ text: '🔙 Back', callback_data: shopBackCallbackFromLeaf(parts) }],
+        ],
+      },
+    });
   }
   if (!Number.isFinite(qty) || qty < 1) {
     return bot.sendMessage(chatId, '⚠️ Enter a whole number of at least 1.');
@@ -928,6 +986,19 @@ bot.on('callback_query', async (query) => {
     }
     const product = catalog.findProduct(pend.productId);
     if (!product) return bot.sendMessage(chatId, '⚠️ Product missing.');
+    if (!isLimitedStockProduct(product) && (u.purchases || []).includes(pend.productId)) {
+      updateUser(userId, { state: null, qtyLeafPath: null, pendingSectionPurchase: null });
+      return bot.sendMessage(chatId, '✅ You already own this file. Use "My Purchases" to download it.');
+    }
+    if (!isLimitedStockProduct(product) && pend.qty !== 1) {
+      return bot.sendMessage(chatId, '⚠️ This file can only be bought once per order.');
+    }
+    if (isSoldOutProduct(product)) {
+      updateUser(userId, { state: null, qtyLeafPath: null, pendingSectionPurchase: null });
+      return bot.sendMessage(chatId, '❌ This item has already been sold.', {
+        reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
+      });
+    }
     const total = parseFloat((product.price * pend.qty).toFixed(2));
     if (u.balance < total) {
       return bot.sendMessage(chatId, `❌ You need ${formatBalance(total)}. Deposit first.`, {
@@ -976,11 +1047,14 @@ bot.on('callback_query', async (query) => {
 
     const user = getUser(userId);
     const alreadyBought = user.purchases.includes(productId);
+    const soldOut = isSoldOutProduct(product) && !alreadyBought;
     const canAfford = user.balance >= product.price;
 
     let buttons = [];
     if (alreadyBought) {
       buttons = [[{ text: '📥 Download Again', callback_data: `download_${productId}` }]];
+    } else if (soldOut) {
+      buttons = [[{ text: '❌ Sold Out', callback_data: 'browse' }]];
     } else if (canAfford) {
       buttons = [[{ text: `✅ Buy Now — ${formatBalance(product.price)}`, callback_data: `buy_${productId}` }]];
     } else {
@@ -990,7 +1064,7 @@ bot.on('callback_query', async (query) => {
 
     return bot.sendMessage(
       chatId,
-      `*${product.name}*\n\n${product.description}\n\n💵 *Price:* ${formatBalance(product.price)}\n💰 *Your Balance:* ${formatBalance(user.balance)}${alreadyBought ? '\n\n✅ You already own this!' : ''}`,
+      `*${product.name}*\n\n${product.description}\n\n💵 *Price:* ${formatBalance(product.price)}\n💰 *Your Balance:* ${formatBalance(user.balance)}${alreadyBought ? '\n\n✅ You already own this!' : ''}${soldOut ? '\n\n❌ This item has already been sold.' : ''}`,
       { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
     );
   }
@@ -1005,6 +1079,11 @@ bot.on('callback_query', async (query) => {
 
     if (user.purchases.includes(productId)) {
       return bot.sendMessage(chatId, '✅ You already own this file. Use "My Purchases" to download it.');
+    }
+    if (isSoldOutProduct(product)) {
+      return bot.sendMessage(chatId, '❌ This item has already been sold.', {
+        reply_markup: { inline_keyboard: [[{ text: '🛒 Shop', callback_data: 'browse' }]] },
+      });
     }
     if (user.balance < product.price) {
       return bot.sendMessage(
@@ -1139,17 +1218,7 @@ bot.on('callback_query', async (query) => {
       });
       saveDB(db);
 
-      if (isNowPaymentsSandbox()) {
-        setImmediate(() => {
-          checkPendingPayments().catch((e) => console.error('[poll]', e.message));
-        });
-      }
-
       const currencyLabel = DEPOSIT_CURRENCIES.find((c) => c.value === currency)?.label || currency.toUpperCase();
-
-      const sandboxNote = isNowPaymentsSandbox()
-        ? `\n🧪 *Sandbox:* no real transfer needed — status simulates as *\`${process.env.NOWPAYMENTS_SANDBOX_CASE || 'success'}\`*; balance should update within ~${Math.ceil(PAYMENT_POLL_MS / 1000)}s.\n`
-        : '';
 
       return bot.sendMessage(
         chatId,
@@ -1159,8 +1228,7 @@ bot.on('callback_query', async (query) => {
           `🔢 Send: *${payment.pay_amount} ${currency.toUpperCase()}*\n\n` +
           `📬 *Address:*\n\`${payment.pay_address}\`\n\n` +
           `⏱ Expires in about *60 minutes*.\n\n` +
-          `✅ Your balance updates *automatically* once the payment is confirmed.` +
-          sandboxNote,
+          `✅ Your balance updates *automatically* once the payment is confirmed.`,
         { parse_mode: 'Markdown', reply_markup: mainReplyKeyboard() }
       );
     } catch (err) {
