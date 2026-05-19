@@ -210,10 +210,18 @@ function jsonForScript(value) {
   return JSON.stringify(value).replace(/</g, '\\u003c');
 }
 
+function renderErrorCard(title, err) {
+  return `<section class="card"><h2>${esc(title)}</h2><p class="err">${esc(err?.message || err || 'Unknown error')}</p></section>`;
+}
+
 function categoryEditOptions() {
-  const nodes = catalog.listStoreNodes();
-  if (!nodes.length) return '<option value="">No categories yet</option>';
-  return nodes.map((n) => `<option value="${esc(n.path)}">${esc(n.label)}</option>`).join('\n');
+  try {
+    const nodes = catalog.listStoreNodes();
+    if (!nodes.length) return '<option value="">No categories yet</option>';
+    return nodes.map((n) => `<option value="${esc(n.path)}">${esc(n.label)}</option>`).join('\n');
+  } catch (e) {
+    return `<option value="">Could not load categories: ${esc(e.message)}</option>`;
+  }
 }
 
 function productSortValue(product) {
@@ -222,6 +230,7 @@ function productSortValue(product) {
 }
 
 function renderRecentProducts(session, limit = 25) {
+  try {
   const visibleProducts = catalog
     .getProducts()
     .filter((p) => session.role === 'admin' || p.sellerUsername === session.username);
@@ -262,6 +271,9 @@ function renderRecentProducts(session, limit = 25) {
       )}</td><td>${updateForm}</td></tr>`;
     })
     .join('\n')}</tbody></table>`;
+  } catch (e) {
+    return renderErrorCard('Recently Added', e);
+  }
 }
 
 function renderAddCategoryCard() {
@@ -326,12 +338,30 @@ function loginHtml({ err } = {}) {
 }
 
 function pageHtml(session, { ok, err, activeTab } = {}) {
-  const banner = ok ? `<p class="ok">${esc(ok)}</p>` : err ? `<p class="err">${esc(err)}</p>` : '';
-  const storeJson = jsonForScript(catalog.getStore());
+  let catalogError = null;
+  let store = [];
+  try {
+    store = catalog.getStore();
+  } catch (e) {
+    catalogError = e;
+  }
+  const banner = ok
+    ? `<p class="ok">${esc(ok)}</p>`
+    : err
+      ? `<p class="err">${esc(err)}</p>`
+      : catalogError
+        ? `<p class="err">Catalog could not be loaded: ${esc(catalogError.message)}</p>`
+        : '';
+  const storeJson = jsonForScript(store);
   const isAdmin = session.role === 'admin';
   const allowedTabs = isAdmin ? ['dashboard', 'add-file', 'categories', 'recent'] : ['dashboard', 'add-file', 'recent'];
   const tab = allowedTabs.includes(activeTab) ? activeTab : 'dashboard';
-  const dashboard = isAdmin ? renderAdminDashboard() : renderSellerDashboard(session, renderAddCategoryCard());
+  let dashboard;
+  try {
+    dashboard = isAdmin ? renderAdminDashboard() : renderSellerDashboard(session, renderAddCategoryCard());
+  } catch (e) {
+    dashboard = renderErrorCard('Dashboard', e);
+  }
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
