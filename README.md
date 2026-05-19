@@ -99,6 +99,57 @@ Run these by messaging your bot directly (only works for your ADMIN_CHAT_ID):
 # Set BOT_TOKEN and ADMIN_CHAT_ID as environment variables
 ```
 
+Uploads and dashboard changes are runtime data. On Railway, attach a persistent volume and set:
+
+```bash
+DATA_DIR=/data
+```
+
+Mount the volume at the same path (`/data`). Without this, every redeploy starts a fresh container and wipes uploaded ZIPs, `catalog.json`, `db.json`, and seller dashboard state.
+
+### Firebase + Cloud Run
+
+Use this for production if you want redeploys to never wipe uploads or dashboard data.
+
+1. Create a Firebase project.
+2. Enable Firestore.
+3. Enable Firebase Storage and note the bucket name, usually `<project-id>.appspot.com`.
+4. Enable Cloud Run and Cloud Scheduler in the same Google Cloud project.
+5. Deploy this app to Cloud Run with the included `Dockerfile`.
+
+Required Cloud Run environment variables:
+
+```bash
+BOT_TOKEN=...
+ADMIN_CHAT_ID=...
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=...
+ADMIN_SESSION_SECRET=...
+FIREBASE_ENABLED=true
+FIREBASE_STORAGE_BUCKET=<project-id>.appspot.com
+TELEGRAM_MODE=webhook
+APP_URL=https://your-cloud-run-url
+TELEGRAM_WEBHOOK_SECRET=<random-secret>
+TASK_SECRET=<random-secret>
+NOWPAYMENTS_API_KEY=...
+```
+
+Before cutting over from Railway, run the one-time migration locally with Firebase credentials:
+
+```bash
+npm run migrate:firebase
+```
+
+Then deploy Cloud Run and stop the Railway service so only one bot receives Telegram updates.
+
+Create a Cloud Scheduler job that sends `POST` to:
+
+```bash
+https://your-cloud-run-url/tasks/check-payments
+```
+
+Set either `Authorization: Bearer <TASK_SECRET>` or `x-task-secret: <TASK_SECRET>` on that job.
+
 ### Render
 - Create a new Web Service → connect GitHub repo
 - Set start command: `node bot.js`

@@ -1,8 +1,9 @@
 const fs = require('fs');
-const path = require('path');
 const catalog = require('./catalog');
+const { runtimeFile } = require('./runtime-paths');
+const firebaseRepo = require('./firebase-repo');
 
-const DB_PATH = path.join(__dirname, 'db.json');
+const DB_PATH = runtimeFile('db.json');
 
 function esc(s) {
   return String(s)
@@ -13,6 +14,12 @@ function esc(s) {
 }
 
 function loadDB() {
+  try {
+    const db = firebaseRepo.getDb();
+    return { orders: Array.isArray(db.orders) ? db.orders : [] };
+  } catch (_) {
+    // Local scripts can still read db.json before Firebase init.
+  }
   try {
     const raw = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
     return { orders: Array.isArray(raw.orders) ? raw.orders : [] };

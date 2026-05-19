@@ -1,4 +1,4 @@
 {
-  "watch": ["bot.js", "catalog.js", "catalog-admin.js", "catalog.json"],
-  "ignore": ["db.json", "node_modules", "deliverables", "assets", ".env"]
+  "watch": ["bot.js", "catalog.js", "catalog-admin.js", "runtime-paths.js", "catalog.json"],
+  "ignore": ["db.json", "admin-state.json", "uploads", "data", "node_modules", "deliverables", "assets", ".env"]
 }

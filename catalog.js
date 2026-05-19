@@ -1,7 +1,8 @@
 const fs = require('fs');
-const path = require('path');
+const { runtimeFile } = require('./runtime-paths');
+const firebaseRepo = require('./firebase-repo');
 
-const CATALOG_PATH = path.join(__dirname, 'catalog.json');
+const CATALOG_PATH = runtimeFile('catalog.json');
 
 const DEFAULT_CATALOG = {
   products: [
@@ -48,6 +49,16 @@ function readDiskMtime() {
 }
 
 function loadCatalog() {
+  try {
+    const remote = firebaseRepo.getCatalog();
+    cache = {
+      products: Array.isArray(remote.products) ? remote.products.map(normalizeProduct) : [],
+      store: Array.isArray(remote.store) ? remote.store : [],
+    };
+    return cache;
+  } catch (_) {
+    // Local tools can still read the seed catalog before Firebase init runs.
+  }
   ensureCatalogFile();
   const mtime = readDiskMtime();
   if (cache && mtime === cacheMtime) return cache;
@@ -98,8 +109,12 @@ function normalizeProduct(p) {
     deliveryFolder: p.deliveryFolder == null || p.deliveryFolder === '' ? null : String(p.deliveryFolder),
     /** Pre-built zip file path (optional; sent as-is if set and file exists). */
     deliveryZipPath: p.deliveryZipPath == null || p.deliveryZipPath === '' ? null : String(p.deliveryZipPath),
+    /** Firebase Storage object for reusable/single delivery ZIPs. */
+    deliveryStoragePath: p.deliveryStoragePath == null || p.deliveryStoragePath === '' ? null : String(p.deliveryStoragePath),
     /** Folder of individual stock documents; one file is delivered per quantity purchased. */
     inventoryFolder: p.inventoryFolder == null || p.inventoryFolder === '' ? null : String(p.inventoryFolder),
+    /** Firebase Storage prefix for limited-stock inventory ZIPs. */
+    inventoryStoragePrefix: p.inventoryStoragePrefix == null || p.inventoryStoragePrefix === '' ? null : String(p.inventoryStoragePrefix),
     sellerUsername: p.sellerUsername == null || p.sellerUsername === '' ? null : String(p.sellerUsername),
     createdByRole: p.createdByRole == null || p.createdByRole === '' ? null : String(p.createdByRole),
     createdAt: p.createdAt == null || p.createdAt === '' ? null : String(p.createdAt),
@@ -172,8 +187,14 @@ function saveCatalog(data) {
   }
   const store = JSON.parse(JSON.stringify(data.store || []));
   validateStoreReferences(products, store);
-  fs.writeFileSync(CATALOG_PATH, JSON.stringify({ products, store }, null, 2), 'utf8');
-  invalidateCatalogCache();
+  const nextCatalog = { products, store };
+  try {
+    firebaseRepo.saveCatalog(nextCatalog);
+    cache = nextCatalog;
+  } catch (_) {
+    fs.writeFileSync(CATALOG_PATH, JSON.stringify(nextCatalog, null, 2), 'utf8');
+    invalidateCatalogCache();
+  }
 }
 
 function nextProductId(products) {
@@ -295,7 +316,9 @@ function addProduct(opts) {
     filePath,
     deliveryFolder,
     deliveryZipPath,
+    deliveryStoragePath,
     inventoryFolder,
+    inventoryStoragePrefix,
     purchaseType,
     sellerUsername,
     createdByRole,
@@ -315,7 +338,9 @@ function addProduct(opts) {
     filePath,
     deliveryFolder,
     deliveryZipPath,
+    deliveryStoragePath,
     inventoryFolder,
+    inventoryStoragePrefix,
     purchaseType,
     sellerUsername,
     createdByRole,

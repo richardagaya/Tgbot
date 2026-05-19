@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log*
+.env
+.env.*
+logs
+data
+uploads
+db.json
+admin-state.json
+.git
+.DS_Store

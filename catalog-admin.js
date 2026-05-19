@@ -6,9 +6,12 @@ const catalog = require('./catalog');
 const auth = require('./admin-auth');
 const { renderAdminDashboard } = require('./admin-dashboard');
 const { renderSellerDashboard } = require('./seller-dashboard');
+const { DATA_DIR, runtimeDir, projectRelativeOrAbsolute, resolveProjectPath } = require('./runtime-paths');
+const firebaseRepo = require('./firebase-repo');
+const firebaseStorage = require('./firebase-storage');
 
 const ADMIN_PATH = '/admin/catalog';
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const UPLOADS_DIR = runtimeDir('uploads');
 const MAX_UPLOAD_FILES = Number(process.env.MAX_UPLOAD_FILES || 200);
 const MAX_UPLOAD_FILE_MB = Number(process.env.MAX_UPLOAD_FILE_MB || 200);
 
@@ -35,12 +38,7 @@ function cleanFilename(name) {
 }
 
 function relativeProjectPath(absPath) {
-  return path.relative(__dirname, absPath).split(path.sep).join('/');
-}
-
-function resolveProjectPath(relOrAbs) {
-  if (!relOrAbs) return null;
-  return path.isAbsolute(relOrAbs) ? relOrAbs : path.join(__dirname, relOrAbs);
+  return projectRelativeOrAbsolute(absPath);
 }
 
 function readBody(req, limit = 256 * 1024) {
@@ -126,6 +124,12 @@ function cleanupFiles(files) {
 }
 
 function inventoryCount(product) {
+  if (product.inventoryStoragePrefix) {
+    const db = firebaseRepo.getDb();
+    return (db.inventoryItems || []).filter(
+      (item) => item.productId === product.id && item.status !== 'sold' && item.storagePath
+    ).length;
+  }
   const folder = resolveProjectPath(product.inventoryFolder);
   if (!folder || !fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) return 0;
   return fs
@@ -136,16 +140,35 @@ function inventoryCount(product) {
 }
 
 function productDeliveryLabel(product) {
-  if (product.deliveryZipPath) return 'Reusable ZIP';
-  if (product.inventoryFolder) return `${inventoryCount(product)} stock file(s)`;
+  if (product.deliveryStoragePath || product.deliveryZipPath) return 'Reusable ZIP';
+  if (product.inventoryStoragePrefix || product.inventoryFolder) return `${inventoryCount(product)} stock file(s)`;
   return 'No file';
 }
 
-function moveDeliveryZipFile(product, files, { replace = false } = {}) {
+async function moveDeliveryZipFile(product, files, { replace = false } = {}) {
   if (!files || files.length !== 1) throw new Error('Upload exactly one ZIP for reusable or single-sale files');
   const [file] = files;
   if (!String(file.originalName || '').toLowerCase().endsWith('.zip')) {
     throw new Error('Only .zip files can be uploaded');
+  }
+  if (firebaseStorage.storageEnabled()) {
+    const prefix = firebaseStorage.storageObjectName('products', product.id, 'delivery');
+    if (replace) await firebaseStorage.deletePrefix(`${prefix}/`);
+    const objectName = firebaseStorage.storageObjectName(prefix, `${Date.now()}-${file.originalName}`);
+    await firebaseStorage.uploadLocalFile(file.tempPath, objectName);
+    try {
+      fs.unlinkSync(file.tempPath);
+    } catch (_) {}
+    return {
+      patch: {
+        deliveryStoragePath: objectName,
+        deliveryZipPath: null,
+        filePath: null,
+        deliveryFolder: null,
+        inventoryFolder: null,
+        inventoryStoragePrefix: null,
+      },
+    };
   }
   const destDir = path.join(UPLOADS_DIR, product.id, 'delivery');
   if (replace && fs.existsSync(destDir)) {
@@ -157,19 +180,58 @@ function moveDeliveryZipFile(product, files, { replace = false } = {}) {
   return {
     patch: {
       deliveryZipPath: relativeProjectPath(dest),
+      deliveryStoragePath: null,
       filePath: null,
       deliveryFolder: null,
       inventoryFolder: null,
+      inventoryStoragePrefix: null,
     },
   };
 }
 
-function moveInventoryFiles(product, files, { replace = false } = {}) {
+async function moveInventoryFiles(product, files, { replace = false } = {}) {
   if (!files || files.length === 0) return { patch: {}, count: 0 };
   for (const f of files) {
     if (!String(f.originalName || '').toLowerCase().endsWith('.zip')) {
       throw new Error('Only .zip files can be uploaded');
     }
+  }
+  if (firebaseStorage.storageEnabled()) {
+    const db = firebaseRepo.getDb();
+    if (!Array.isArray(db.inventoryItems)) db.inventoryItems = [];
+    const prefix = firebaseStorage.storageObjectName('products', product.id, 'inventory');
+    if (replace) {
+      await firebaseStorage.deletePrefix(`${prefix}/`);
+      db.inventoryItems = db.inventoryItems.filter((item) => item.productId !== product.id || item.status === 'sold');
+    }
+    for (const f of files) {
+      const objectName = firebaseStorage.storageObjectName(prefix, `${Date.now()}-${Math.random().toString(16).slice(2)}-${f.originalName}`);
+      await firebaseStorage.uploadLocalFile(f.tempPath, objectName);
+      db.inventoryItems.push({
+        id: `${product.id}_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        productId: product.id,
+        filename: f.originalName,
+        storagePath: objectName,
+        status: 'available',
+        createdAt: new Date().toISOString(),
+      });
+      try {
+        fs.unlinkSync(f.tempPath);
+      } catch (_) {}
+    }
+    firebaseRepo.saveDb(db);
+    const count = db.inventoryItems.filter((item) => item.productId === product.id && item.status !== 'sold').length;
+    return {
+      patch: {
+        inventoryStoragePrefix: prefix,
+        inventoryFolder: null,
+        filePath: null,
+        deliveryFolder: null,
+        deliveryZipPath: null,
+        deliveryStoragePath: null,
+      },
+      count,
+    };
   }
   const destDir = path.join(UPLOADS_DIR, product.id, 'inventory');
   if (replace && fs.existsSync(destDir)) {
@@ -189,9 +251,11 @@ function moveInventoryFiles(product, files, { replace = false } = {}) {
   return {
     patch: {
       inventoryFolder: relativeProjectPath(destDir),
+      inventoryStoragePrefix: null,
       filePath: null,
       deliveryFolder: null,
       deliveryZipPath: null,
+      deliveryStoragePath: null,
     },
     count: inventoryCount({ inventoryFolder: relativeProjectPath(destDir) }),
   };
@@ -414,7 +478,7 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
     <input type="hidden" name="action" value="logout" />
     <button type="submit" class="tab-btn">Log Out</button>
   </form>
-  <p class="warn"><strong>Railway:</strong> add a persistent volume or uploads/catalog changes may disappear after redeploys.</p>
+  <p class="warn"><strong>Storage:</strong> runtime data directory is <code>${esc(DATA_DIR)}</code>. On Railway, mount a persistent volume here or uploads/catalog changes disappear after redeploys.</p>
   ${banner}
 
   <div class="tabs">
@@ -791,8 +855,8 @@ async function handleAdminPost(req, session) {
       });
       const moved =
         purchaseType === 'limited'
-          ? moveInventoryFiles(product, files)
-          : moveDeliveryZipFile(product, files);
+          ? await moveInventoryFiles(product, files)
+          : await moveDeliveryZipFile(product, files);
       catalog.updateProduct(product.id, moved.patch);
       catalog.updateStoreNode(fields.leaf, {
         description: fields.description,
@@ -859,7 +923,7 @@ async function handleAdminPost(req, session) {
       if (product.purchaseType === 'limited') {
         throw new Error('Use Add stock ZIPs for limited-stock products');
       }
-      const moved = moveDeliveryZipFile(product, files, { replace: true });
+      const moved = await moveDeliveryZipFile(product, files, { replace: true });
       catalog.updateProduct(product.id, moved.patch);
       for (const pathKey of productLocationPaths(product.id)) {
         catalog.updateStoreNode(pathKey, {
@@ -875,7 +939,7 @@ async function handleAdminPost(req, session) {
       if (!canManageProduct(session, product)) throw new Error('You can only update your own files');
       if (product.purchaseType !== 'limited') throw new Error('Only limited-stock products can receive stock batches');
       if (!files.length) throw new Error('Upload at least one stock document');
-      const moved = moveInventoryFiles(product, files);
+      const moved = await moveInventoryFiles(product, files);
       catalog.updateProduct(product.id, moved.patch);
       for (const pathKey of productLocationPaths(product.id)) {
         catalog.updateStoreNode(pathKey, {
@@ -961,6 +1025,7 @@ async function tryHandleCatalogAdmin(req, res) {
 
     req.parsedAdminPost = parsed;
     const html = await handleAdminPost(req, session);
+    await firebaseRepo.waitForPendingWrites();
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
     return true;

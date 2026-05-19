@@ -8,8 +8,13 @@ const https = require('https');
 const http = require('http');
 const catalog = require('./catalog');
 const { tryHandleCatalogAdmin, ADMIN_PATH } = require('./catalog-admin');
+const { runtimeFile, resolveProjectPath } = require('./runtime-paths');
+const firebaseRepo = require('./firebase-repo');
+const firebaseStorage = require('./firebase-storage');
 
-catalog.ensureCatalogFile();
+const appReady = firebaseRepo.initializeFirebaseRepo().then(() => {
+  catalog.ensureCatalogFile();
+});
 
 if (!process.env.BOT_TOKEN || String(process.env.BOT_TOKEN).trim() === '') {
   console.error('FATAL: BOT_TOKEN is missing. Add it in Railway → Variables (same name: BOT_TOKEN).');
@@ -18,11 +23,46 @@ if (!process.env.BOT_TOKEN || String(process.env.BOT_TOKEN).trim() === '') {
 
 // Railway / Render: PORT. Local admin UI: set ADMIN_HTTP_PORT if you have no PORT.
 const HTTP_PORT = Number(process.env.PORT || process.env.ADMIN_HTTP_PORT || 0);
+const TELEGRAM_MODE = String(process.env.TELEGRAM_MODE || (process.env.K_SERVICE ? 'webhook' : 'polling')).toLowerCase();
+const WEBHOOK_PATH = process.env.TELEGRAM_WEBHOOK_PATH || '/telegram/webhook';
+const TASK_SECRET = process.env.TASK_SECRET || process.env.ADMIN_SESSION_SECRET || '';
+
+function readJsonBody(req, limit = 2 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function authorizeSecret(req, expected) {
+  if (!expected) return true;
+  const header = req.headers.authorization || req.headers['x-task-secret'] || '';
+  return header === expected || header === `Bearer ${expected}`;
+}
+
 if (HTTP_PORT) {
   http
     .createServer((req, res) => {
       (async () => {
         try {
+          await appReady;
           if (await tryHandleCatalogAdmin(req, res)) return;
         } catch (e) {
           console.error('[http]', e.message);
@@ -33,6 +73,39 @@ if (HTTP_PORT) {
           return;
         }
         const u = req.url || '/';
+        const pathname = (() => {
+          try {
+            return new URL(u, `http://${req.headers.host || 'localhost'}`).pathname;
+          } catch {
+            return u.split('?')[0];
+          }
+        })();
+        if (pathname === WEBHOOK_PATH && req.method === 'POST') {
+          const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+          const actual = req.headers['x-telegram-bot-api-secret-token'];
+          if (expected && actual !== expected) {
+            res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('Unauthorized');
+            return;
+          }
+          const update = await readJsonBody(req);
+          await bot.processUpdate(update);
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('OK');
+          return;
+        }
+        if (pathname === '/tasks/check-payments' && req.method === 'POST') {
+          if (!authorizeSecret(req, TASK_SECRET)) {
+            res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('Unauthorized');
+            return;
+          }
+          await checkPendingPayments();
+          await firebaseRepo.waitForPendingWrites();
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('OK');
+          return;
+        }
         if (u === '/' || u === '/health' || u.startsWith('/?')) {
           res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
           res.end('OK');
@@ -82,20 +155,37 @@ process.on('uncaughtException', (err) => {
 });
 
 // ─── Database ─────────────────────────────────────────────────────────────────
-const DB_PATH = './db.json';
+const DB_PATH = runtimeFile('db.json');
 
 function loadDB() {
+  try {
+    const db = firebaseRepo.getDb();
+    if (!db.users) db.users = {};
+    if (!Array.isArray(db.orders)) db.orders = [];
+    if (!Array.isArray(db.pendingPayments)) db.pendingPayments = [];
+    if (!db.sectionStock) db.sectionStock = {};
+    return db;
+  } catch (_) {
+    // Local tools can still use db.json before Firebase init.
+  }
   if (!fs.existsSync(DB_PATH)) {
     fs.writeFileSync(DB_PATH, JSON.stringify({ users: {}, orders: [], pendingPayments: [] }));
   }
   const db = JSON.parse(fs.readFileSync(DB_PATH));
+  if (!db.users) db.users = {};
+  if (!Array.isArray(db.orders)) db.orders = [];
   if (!db.pendingPayments) db.pendingPayments = [];
   if (!db.sectionStock) db.sectionStock = {};
   return db;
 }
 
 function saveDB(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  try {
+    return firebaseRepo.saveDb(db);
+  } catch (_) {
+    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+    return Promise.resolve();
+  }
 }
 
 function getUser(userId) {
@@ -284,14 +374,16 @@ async function checkPendingPayments() {
     const done = db.pendingPayments.filter((p) => FINAL_STATUSES.has(p.status)).slice(-100);
     const still_active = db.pendingPayments.filter((p) => !FINAL_STATUSES.has(p.status));
     db.pendingPayments = [...still_active, ...done];
-    saveDB(db);
+    await saveDB(db);
   }
 }
 
 const PAYMENT_POLL_MS = 60 * 1000;
-setInterval(() => {
-  checkPendingPayments().catch((e) => console.error('[poll interval]', e.message));
-}, PAYMENT_POLL_MS);
+if (TELEGRAM_MODE === 'polling') {
+  setInterval(() => {
+    checkPendingPayments().catch((e) => console.error('[poll interval]', e.message));
+  }, PAYMENT_POLL_MS);
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatBalance(amount) {
@@ -322,6 +414,7 @@ function getLeafFromPathKey(pathKey) {
 }
 
 function productInventoryFiles(product) {
+  if (product?.inventoryStoragePrefix) return null;
   const folder = resolveProductFsPath(product.inventoryFolder);
   if (!folder || !fs.existsSync(folder)) return null;
   const st = fs.statSync(folder);
@@ -332,6 +425,14 @@ function productInventoryFiles(product) {
     .map((name) => path.join(folder, name))
     .filter((fp) => fs.statSync(fp).isFile())
     .sort();
+}
+
+function productInventoryItems(product) {
+  if (!product?.inventoryStoragePrefix) return null;
+  const db = loadDB();
+  return (db.inventoryItems || [])
+    .filter((item) => item.productId === product.id && item.status !== 'sold' && item.storagePath)
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
 }
 
 function productSoldQty(productId) {
@@ -367,6 +468,8 @@ function getSectionStock(pathKey) {
     const v = db.sectionStock[pathKey];
     return v === null ? null : v;
   }
+  const inventoryItems = product ? productInventoryItems(product) : null;
+  if (inventoryItems) return inventoryItems.length;
   const inventory = product ? productInventoryFiles(product) : null;
   if (inventory) return inventory.length;
   const qa = hit.r.node.quantityAvailable;
@@ -393,6 +496,8 @@ function decrementSectionStock(pathKey, qty) {
   const product = productId ? catalog.findProduct(productId) : null;
   if (isSinglePurchaseProduct(product)) return qty <= 1 && !isSoldOutProduct(product);
   if (product && !isLimitedStockProduct(product)) return true;
+  const inventoryItems = product ? productInventoryItems(product) : null;
+  if (inventoryItems) return inventoryItems.length >= qty;
   const inventory = product ? productInventoryFiles(product) : null;
   if (inventory) return inventory.length >= qty;
 
@@ -1040,7 +1145,7 @@ bot.on('callback_query', async (query) => {
       qty: pend.qty,
       date: new Date().toISOString(),
     });
-    saveDB(db);
+    await saveDB(db);
     await bot.sendMessage(
       chatId,
       `🎉 *Purchase successful!*\n\n${product.name} × ${pend.qty}\nTotal: *${formatBalance(total)}*\n\nDelivering your file…`,
@@ -1117,7 +1222,7 @@ bot.on('callback_query', async (query) => {
       qty: 1,
       date: new Date().toISOString(),
     });
-    saveDB(db);
+    await saveDB(db);
 
     await bot.sendMessage(chatId, `🎉 *Purchase successful!*\n\n${product.name}\n\nDelivering your file now...`, { parse_mode: 'Markdown' });
     return await deliverPurchasedFiles(chatId, product, 1);
@@ -1226,7 +1331,7 @@ bot.on('callback_query', async (query) => {
         status:     payment.payment_status || 'waiting',
         createdAt:  new Date().toISOString(),
       });
-      saveDB(db);
+      await saveDB(db);
 
       const currencyLabel = DEPOSIT_CURRENCIES.find((c) => c.value === currency)?.label || currency.toUpperCase();
 
@@ -1269,8 +1374,7 @@ function resolveProductFsPath(relOrAbs) {
   if (!relOrAbs) return null;
   const s = String(relOrAbs).trim();
   if (!s) return null;
-  if (path.isAbsolute(s)) return s;
-  return path.join(__dirname, s);
+  return resolveProjectPath(s);
 }
 
 function safeZipFilename(name) {
@@ -1306,6 +1410,48 @@ function syncProductStock(productId, count) {
 }
 
 async function deliverPurchasedFiles(chatId, product, qty = 1) {
+  const inventoryItems = productInventoryItems(product);
+  if (inventoryItems) {
+    const count = Math.max(1, Math.floor(Number(qty) || 1));
+    if (inventoryItems.length < count) {
+      return bot.sendMessage(
+        chatId,
+        `📥 *${product.name}*\n\n⚠️ Only ${inventoryItems.length} delivery file(s) are available right now.`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+    const selected = inventoryItems.slice(0, count);
+    const sentAt = new Date().toISOString();
+    for (let i = 0; i < selected.length; i += 1) {
+      const item = selected[i];
+      const tempPath = await firebaseStorage.downloadToTemp(item.storagePath, item.filename || `${product.id}.zip`);
+      try {
+        await bot.sendDocument(chatId, fs.createReadStream(tempPath), {
+          caption: `📥 *${product.name}*${selected.length > 1 ? `\n\nFile ${i + 1} of ${selected.length}` : ''}`,
+          parse_mode: 'Markdown',
+        }, {
+          filename: item.filename || path.basename(tempPath),
+          contentType: 'application/zip',
+        });
+      } finally {
+        try {
+          fs.unlinkSync(tempPath);
+        } catch (_) {}
+      }
+      item.status = 'sold';
+      item.soldAt = sentAt;
+      item.deliveredTo = String(chatId);
+    }
+    const db = loadDB();
+    const soldIds = new Set(selected.map((item) => item.id));
+    db.inventoryItems = (db.inventoryItems || []).map((item) =>
+      soldIds.has(item.id) ? { ...item, status: 'sold', soldAt: sentAt, deliveredTo: String(chatId) } : item
+    );
+    await saveDB(db);
+    syncProductStock(product.id, Math.max(0, inventoryItems.length - selected.length));
+    return null;
+  }
+
   const inventory = productInventoryFiles(product);
   if (!inventory) return deliverFile(chatId, product);
 
@@ -1341,6 +1487,18 @@ async function deliverFile(chatId, product) {
   const captionZip = `📥 *${product.name}*\n\nThank you for your purchase — your files are in the ZIP below.`;
   let tempZip = null;
   try {
+    if (product.deliveryStoragePath) {
+      const tempPath = await firebaseStorage.downloadToTemp(product.deliveryStoragePath, safeZipFilename(product.name));
+      tempZip = tempPath;
+      return bot.sendDocument(chatId, fs.createReadStream(tempPath), {
+        caption: captionZip,
+        parse_mode: 'Markdown',
+      }, {
+        filename: safeZipFilename(product.name),
+        contentType: 'application/zip',
+      });
+    }
+
     const deliveryZip = resolveProductFsPath(product.deliveryZipPath);
     if (deliveryZip && fs.existsSync(deliveryZip)) {
       const st = fs.statSync(deliveryZip);
@@ -1466,19 +1624,35 @@ bot.onText(/\/payments/, (msg) => {
   bot.sendMessage(msg.chat.id, `⏳ *Active payments (${active.length}):*\n\n${text}`, { parse_mode: 'Markdown' });
 });
 
-bot
-  .deleteWebHook()
-  .then(() => {
-    bot.startPolling();
-    console.log('🤖 Telegram polling started.');
-    setTimeout(() => {
-      checkPendingPayments().catch((e) => console.error('[poll startup]', e.message));
-    }, 2000);
-  })
-  .catch((err) => {
-    console.error('FATAL: could not delete webhook / start polling:', err.message);
-    process.exit(1);
-  });
+async function startTelegramRuntime() {
+  await appReady;
+  if (TELEGRAM_MODE === 'webhook') {
+    const webhookUrl =
+      process.env.TELEGRAM_WEBHOOK_URL ||
+      (process.env.APP_URL ? `${String(process.env.APP_URL).replace(/\/+$/, '')}${WEBHOOK_PATH}` : '');
+    if (!webhookUrl) {
+      console.warn('[telegram] TELEGRAM_MODE=webhook but TELEGRAM_WEBHOOK_URL or APP_URL is not set. Webhook was not registered.');
+      return;
+    }
+    await bot.setWebHook(webhookUrl, {
+      secret_token: process.env.TELEGRAM_WEBHOOK_SECRET || undefined,
+    });
+    console.log(`🤖 Telegram webhook registered: ${webhookUrl}`);
+    return;
+  }
+
+  await bot.deleteWebHook();
+  bot.startPolling();
+  console.log('🤖 Telegram polling started.');
+  setTimeout(() => {
+    checkPendingPayments().catch((e) => console.error('[poll startup]', e.message));
+  }, 2000);
+}
+
+startTelegramRuntime().catch((err) => {
+  console.error('FATAL: could not start Telegram runtime:', err.message);
+  process.exit(1);
+});
 
 bot
   .setMyCommands([

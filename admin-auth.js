@@ -1,13 +1,19 @@
 const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
+const { runtimeFile } = require('./runtime-paths');
+const firebaseRepo = require('./firebase-repo');
 
 const ADMIN_PATH = '/admin/catalog';
 const AUTH_COOKIE = 'catalog_admin_session';
 const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
-const ADMIN_STATE_PATH = path.join(__dirname, 'admin-state.json');
+const ADMIN_STATE_PATH = runtimeFile('admin-state.json');
 
 function readState() {
+  try {
+    return firebaseRepo.getAdminState();
+  } catch (_) {
+    // Allow local scripts to run before Firebase init.
+  }
   try {
     const raw = JSON.parse(fs.readFileSync(ADMIN_STATE_PATH, 'utf8'));
     return {
@@ -21,7 +27,11 @@ function readState() {
 }
 
 function saveState(state) {
-  fs.writeFileSync(ADMIN_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+  try {
+    firebaseRepo.saveAdminState(state);
+  } catch (_) {
+    fs.writeFileSync(ADMIN_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+  }
 }
 
 function parseCookies(req) {

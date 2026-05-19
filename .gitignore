@@ -5,9 +5,14 @@ node_modules/
 .env
 .env.*
 !.env.example
+*service-account*.json
+firebase-credentials.json
 
-# Runtime data (balances, orders)
+# Runtime data (balances, orders, seller accounts, uploaded files)
 db.json
+admin-state.json
+uploads/
+data/
 
 # PM2 logs
 logs/

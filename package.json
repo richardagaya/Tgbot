@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node bot.js",
     "dev": "nodemon bot.js",
+    "migrate:firebase": "node scripts/migrate-to-firebase.js",
     "pm2:start": "npx pm2 start ecosystem.config.js",
     "pm2:stop": "npx pm2 stop tg-bot",
     "pm2:restart": "npx pm2 restart tg-bot",
@@ -16,6 +17,7 @@
     "archiver": "^7.0.1",
     "busboy": "^1.6.0",
     "dotenv": "^16.0.0",
+    "firebase-admin": "^13.10.0",
     "node-telegram-bot-api": "^0.64.0"
   },
   "devDependencies": {
