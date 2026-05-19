@@ -98,6 +98,25 @@ async function initializeFirebaseRepo() {
   initialized = true;
 }
 
+async function refreshFromFirestore() {
+  if (!initialized || !firebaseEnabled()) return;
+  await waitForPendingWrites();
+  const [catalog, db, adminState] = await Promise.all([
+    docRef('catalog').get(),
+    docRef('db').get(),
+    docRef('adminState').get(),
+  ]);
+  if (catalog.exists) {
+    const data = catalog.data();
+    cache.catalog = {
+      products: Array.isArray(data.products) ? data.products : [],
+      store: Array.isArray(data.store) ? data.store : [],
+    };
+  }
+  if (db.exists) cache.db = normalizeDb(db.data());
+  if (adminState.exists) cache.adminState = normalizeAdminState(adminState.data());
+}
+
 function assertInitialized() {
   if (!initialized) {
     throw new Error('Firebase repository has not been initialized. Call initializeFirebaseRepo() before handling requests.');
@@ -173,6 +192,7 @@ module.exports = {
   DEFAULT_DB,
   DEFAULT_ADMIN_STATE,
   initializeFirebaseRepo,
+  refreshFromFirestore,
   waitForPendingWrites,
   getCatalog,
   saveCatalog,

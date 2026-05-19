@@ -63,6 +63,7 @@ if (HTTP_PORT) {
       (async () => {
         try {
           await appReady;
+          await firebaseRepo.refreshFromFirestore();
           if (await tryHandleCatalogAdmin(req, res)) return;
         } catch (e) {
           console.error('[http]', e.message);
