@@ -9,6 +9,8 @@ const { renderSellerDashboard } = require('./seller-dashboard');
 
 const ADMIN_PATH = '/admin/catalog';
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const MAX_UPLOAD_FILES = Number(process.env.MAX_UPLOAD_FILES || 200);
+const MAX_UPLOAD_FILE_MB = Number(process.env.MAX_UPLOAD_FILE_MB || 200);
 
 function esc(s) {
   return String(s)
@@ -59,7 +61,7 @@ function readBody(req, limit = 256 * 1024) {
   });
 }
 
-function readMultipart(req, limitMb = 200) {
+function readMultipart(req, limitMb = MAX_UPLOAD_FILE_MB) {
   return new Promise((resolve, reject) => {
     const fields = {};
     const files = [];
@@ -69,7 +71,7 @@ function readMultipart(req, limitMb = 200) {
 
     const busboy = Busboy({
       headers: req.headers,
-      limits: { files: 100, fileSize: limitMb * 1024 * 1024, fields: 80 },
+      limits: { files: MAX_UPLOAD_FILES, fileSize: limitMb * 1024 * 1024, fields: 80 },
     });
 
     busboy.on('field', (name, val) => {
@@ -219,13 +221,16 @@ function productSortValue(product) {
   return m ? Number(m[1]) : 0;
 }
 
-function renderRecentProducts(limit = 10) {
-  const products = [...catalog.getProducts()]
+function renderRecentProducts(session, limit = 25) {
+  const visibleProducts = catalog
+    .getProducts()
+    .filter((p) => session.role === 'admin' || p.sellerUsername === session.username);
+  const products = [...visibleProducts]
     .sort((a, b) => productSortValue(b) - productSortValue(a))
     .slice(0, limit);
   if (!products.length) return '<p class="muted">No files have been added yet.</p>';
 
-  return `<table><thead><tr><th>File</th><th>Category</th><th>Price</th><th>Type</th><th>Delivery</th><th>Description</th></tr></thead><tbody>${products
+  return `<table><thead><tr><th>File</th><th>Category</th><th>Price</th><th>Type</th><th>Delivery</th><th>Description</th><th>Update delivery</th></tr></thead><tbody>${products
     .map((p) => {
       const locations = productLocationPaths(p.id)
         .map((pathKey) => {
@@ -233,13 +238,28 @@ function renderRecentProducts(limit = 10) {
           return node ? node.label : pathKey;
         })
         .join('<br>') || '<span class="muted">Not shown in shop</span>';
+      const updateForm =
+        p.purchaseType === 'limited'
+          ? `<form class="inline-form" method="post" action="${ADMIN_PATH}" enctype="multipart/form-data">
+              <input type="hidden" name="action" value="add_inventory_files" />
+              <input type="hidden" name="productId" value="${esc(p.id)}" />
+              <input name="files" type="file" accept=".zip,application/zip" multiple required />
+              <p class="hint">Add stock in batches. Current server limit: ${esc(MAX_UPLOAD_FILES)} files per upload.</p>
+              <button type="submit" class="small-btn">Add stock ZIPs</button>
+            </form>`
+          : `<form class="inline-form" method="post" action="${ADMIN_PATH}" enctype="multipart/form-data">
+              <input type="hidden" name="action" value="upload_product_file" />
+              <input type="hidden" name="productId" value="${esc(p.id)}" />
+              <input name="files" type="file" accept=".zip,application/zip" required />
+              <button type="submit" class="small-btn">Replace ZIP</button>
+            </form>`;
       return `<tr><td><code>${esc(p.id)}</code><br>${esc(p.name)}<br><span class="muted">seller: ${esc(
         p.sellerUsername || 'admin'
       )}</span></td><td>${locations}</td><td>$${Number(
         p.price
       ).toFixed(2)}</td><td>${esc(p.purchaseType || 'reusable')}</td><td>${esc(productDeliveryLabel(p))}</td><td>${esc(
         p.description || ''
-      )}</td></tr>`;
+      )}</td><td>${updateForm}</td></tr>`;
     })
     .join('\n')}</tbody></table>`;
 }
@@ -406,7 +426,7 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
       </select>
       <label>Upload File</label>
       <input name="files" type="file" accept=".zip,application/zip" multiple required />
-      <p class="hint">Reusable and single-sale products use one ZIP. Limited stock products use one ZIP per available item.</p>
+      <p class="hint">Reusable and single-sale products use one ZIP. Limited stock products use one ZIP per available item. For large stock, upload the first batch here, then add more from Recently Added.</p>
       <button type="submit">Upload File</button>
     </form>
   </section>
@@ -457,7 +477,7 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
 
   <section class="card tab-panel ${tab === 'recent' ? 'active' : ''}" id="tab-recent">
     <h2>Recently Added</h2>
-    ${renderRecentProducts()}
+    ${renderRecentProducts(session)}
   </section>
 
   <script>
@@ -695,6 +715,11 @@ function assertAdmin(session) {
   if (!session || session.role !== 'admin') throw new Error('Only admins can do that');
 }
 
+function canManageProduct(session, product) {
+  if (!session || !product) return false;
+  return session.role === 'admin' || product.sellerUsername === session.username;
+}
+
 async function handleAdminPost(req, session) {
   let parsed = { fields: {}, files: [] };
   try {
@@ -799,11 +824,12 @@ async function handleAdminPost(req, session) {
     if (fields.action === 'upload_product_file') {
       const product = catalog.findProduct(fields.productId);
       if (!product) throw new Error('Product not found');
+      if (!canManageProduct(session, product)) throw new Error('You can only update your own files');
       if (!files.length) throw new Error('Upload at least one delivery document');
-      const moved =
-        product.purchaseType === 'limited'
-          ? moveInventoryFiles(product, files, { replace: true })
-          : moveDeliveryZipFile(product, files, { replace: true });
+      if (product.purchaseType === 'limited') {
+        throw new Error('Use Add stock ZIPs for limited-stock products');
+      }
+      const moved = moveDeliveryZipFile(product, files, { replace: true });
       catalog.updateProduct(product.id, moved.patch);
       for (const pathKey of productLocationPaths(product.id)) {
         catalog.updateStoreNode(pathKey, {
@@ -811,6 +837,31 @@ async function handleAdminPost(req, session) {
         });
       }
       return pageHtml(session, { ok: `Updated ${product.name}`, activeTab: 'recent' });
+    }
+
+    if (fields.action === 'add_inventory_files') {
+      const product = catalog.findProduct(fields.productId);
+      if (!product) throw new Error('Product not found');
+      if (!canManageProduct(session, product)) throw new Error('You can only update your own files');
+      if (product.purchaseType !== 'limited') throw new Error('Only limited-stock products can receive stock batches');
+      if (!files.length) throw new Error('Upload at least one stock document');
+      const moved = moveInventoryFiles(product, files);
+      catalog.updateProduct(product.id, moved.patch);
+      for (const pathKey of productLocationPaths(product.id)) {
+        catalog.updateStoreNode(pathKey, {
+          quantityAvailable: moved.count,
+        });
+      }
+      auth.recordActivity({
+        actor: session.username,
+        role: session.role,
+        action: 'add_inventory_files',
+        detail: `Added ${files.length} stock ZIP(s) to ${product.name}`,
+      });
+      return pageHtml(session, {
+        ok: `Added ${files.length} stock ZIP(s). ${moved.count} available for ${product.name}`,
+        activeTab: 'recent',
+      });
     }
 
     throw new Error('Unknown action');

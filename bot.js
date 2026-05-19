@@ -73,6 +73,14 @@ bot.on('error', (err) => {
   console.error('[bot_error]', err.message);
 });
 
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err?.stack || err?.message || err);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err?.message || err);
+});
+
 // ─── Database ─────────────────────────────────────────────────────────────────
 const DB_PATH = './db.json';
 
@@ -281,7 +289,9 @@ async function checkPendingPayments() {
 }
 
 const PAYMENT_POLL_MS = 60 * 1000;
-setInterval(checkPendingPayments, PAYMENT_POLL_MS);
+setInterval(() => {
+  checkPendingPayments().catch((e) => console.error('[poll interval]', e.message));
+}, PAYMENT_POLL_MS);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatBalance(amount) {
@@ -942,7 +952,7 @@ bot.on('callback_query', async (query) => {
   const userId = query.from.id;
   const data = query.data;
 
-  bot.answerCallbackQuery(query.id);
+  bot.answerCallbackQuery(query.id).catch((e) => console.error('[answerCallbackQuery]', e.message));
 
   if (data === 'support') {
     const url = process.env.SUPPORT_URL;
