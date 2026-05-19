@@ -107,6 +107,11 @@ if (HTTP_PORT) {
           res.end('OK');
           return;
         }
+        if (pathname === '/admin' || pathname === '/admin/') {
+          res.writeHead(302, { Location: ADMIN_PATH });
+          res.end();
+          return;
+        }
         if (u === '/' || u === '/health' || u.startsWith('/?')) {
           res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
           res.end('OK');

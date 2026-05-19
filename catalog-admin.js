@@ -6,11 +6,12 @@ const catalog = require('./catalog');
 const auth = require('./admin-auth');
 const { renderAdminDashboard } = require('./admin-dashboard');
 const { renderSellerDashboard } = require('./seller-dashboard');
-const { DATA_DIR, runtimeDir, projectRelativeOrAbsolute, resolveProjectPath } = require('./runtime-paths');
+const { DATA_DIR, runtimeDir, projectRelativeOrAbsolute, resolveProjectPath, PROJECT_DIR } = require('./runtime-paths');
 const firebaseRepo = require('./firebase-repo');
 const firebaseStorage = require('./firebase-storage');
 
 const ADMIN_PATH = '/admin/catalog';
+const LOGO_PATH = '/admin/logo';
 const UPLOADS_DIR = runtimeDir('uploads');
 const MAX_UPLOAD_FILES = Number(process.env.MAX_UPLOAD_FILES || 200);
 const MAX_UPLOAD_FILE_MB = Number(process.env.MAX_UPLOAD_FILE_MB || 200);
@@ -303,7 +304,7 @@ function renderRecentProducts(session, limit = 25) {
     .slice(0, limit);
   if (!products.length) return '<p class="muted">No files have been added yet.</p>';
 
-  return `<table><thead><tr><th>File</th><th>Category</th><th>Price</th><th>Type</th><th>Delivery</th><th>Description</th><th>Update delivery</th></tr></thead><tbody>${products
+  return `<table><thead><tr><th>File</th><th>Category</th><th>Price</th><th>Type</th><th>Delivery</th><th>Description</th><th>Update delivery</th><th>Delete</th></tr></thead><tbody>${products
     .map((p) => {
       const locations = productLocationPaths(p.id)
         .map((pathKey) => {
@@ -326,13 +327,18 @@ function renderRecentProducts(session, limit = 25) {
               <input name="files" type="file" accept=".zip,application/zip" required />
               <button type="submit" class="small-btn">Replace ZIP</button>
             </form>`;
+      const deleteForm = `<form class="inline-form" method="post" action="${ADMIN_PATH}" onsubmit="return confirm('Delete ${esc(p.name)}? This cannot be undone.')">
+        <input type="hidden" name="action" value="delete_product" />
+        <input type="hidden" name="productId" value="${esc(p.id)}" />
+        <button type="submit" class="small-btn danger">Delete</button>
+      </form>`;
       return `<tr><td><code>${esc(p.id)}</code><br>${esc(p.name)}<br><span class="muted">seller: ${esc(
         p.sellerUsername || 'admin'
       )}</span></td><td>${locations}</td><td>$${Number(
         p.price
       ).toFixed(2)}</td><td>${esc(p.purchaseType || 'reusable')}</td><td>${esc(productDeliveryLabel(p))}</td><td>${esc(
         p.description || ''
-      )}</td><td>${updateForm}</td></tr>`;
+      )}</td><td>${updateForm}</td><td>${deleteForm}</td></tr>`;
     })
     .join('\n')}</tbody></table>`;
   } catch (e) {
@@ -371,32 +377,121 @@ function loginHtml({ err } = {}) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Shop Admin Login</title>
+  <title>STIX Market — Admin</title>
   <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 28rem; margin: 5rem auto; padding: 0 1rem; background: #f6f7f9; color: #151515; }
-    h1 { margin: 0 0 0.25rem; font-size: 1.8rem; }
-    label { display: block; margin-top: 0.75rem; font-weight: 700; font-size: 0.88rem; }
-    input { width: 100%; box-sizing: border-box; margin-top: 0.3rem; padding: 0.7rem; border: 1px solid #d1d5db; border-radius: 12px; font: inherit; background: white; }
-    button { width: 100%; margin-top: 1rem; padding: 0.72rem 1.1rem; border: 0; border-radius: 999px; background: #111827; color: white; font: inherit; font-weight: 800; cursor: pointer; }
-    .card { background: white; border: 1px solid #e5e7eb; border-radius: 18px; padding: 1rem; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-    .muted { color: #667085; font-size: 0.9rem; }
-    .err { background: #fef3f2; border: 1px solid #fecdca; padding: 0.85rem 1rem; border-radius: 12px; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0a0a0a;
+      color: #f0f0f0;
+      padding: 1rem;
+    }
+    .login-wrap {
+      width: 100%;
+      max-width: 22rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+    }
+    .logo {
+      width: 220px;
+      height: 220px;
+      object-fit: contain;
+      border-radius: 20px;
+    }
+    .card {
+      width: 100%;
+      background: #141414;
+      border: 1px solid #2a2a2a;
+      border-radius: 20px;
+      padding: 1.75rem 1.5rem;
+      box-shadow: 0 0 40px rgba(0,255,65,0.08);
+    }
+    .card-title {
+      font-size: 1.25rem;
+      font-weight: 800;
+      color: #39ff14;
+      margin-bottom: 0.25rem;
+      letter-spacing: 0.04em;
+    }
+    .card-sub {
+      font-size: 0.85rem;
+      color: #667085;
+      margin-bottom: 1.25rem;
+    }
+    label {
+      display: block;
+      margin-top: 1rem;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #a0a0a0;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    input {
+      width: 100%;
+      margin-top: 0.35rem;
+      padding: 0.75rem 1rem;
+      border: 1px solid #2a2a2a;
+      border-radius: 12px;
+      font: inherit;
+      background: #0d0d0d;
+      color: #f0f0f0;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus { border-color: #39ff14; }
+    button {
+      width: 100%;
+      margin-top: 1.5rem;
+      padding: 0.85rem 1rem;
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #39ff14 0%, #00c853 100%);
+      color: #0a0a0a;
+      font: inherit;
+      font-weight: 900;
+      font-size: 1rem;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    button:hover { opacity: 0.9; }
+    button:active { transform: scale(0.98); }
+    .err {
+      margin-top: 1rem;
+      background: rgba(180,35,24,0.15);
+      border: 1px solid #b42318;
+      color: #fca5a5;
+      padding: 0.75rem 1rem;
+      border-radius: 12px;
+      font-size: 0.88rem;
+    }
   </style>
 </head>
 <body>
-  <section class="card">
-    <h1>Shop Admin Login</h1>
-    <p class="muted">Sign in as an admin or seller.</p>
-    ${banner}
-    <form method="post" action="${ADMIN_PATH}">
-      <input type="hidden" name="action" value="login" />
-      <label>Username</label>
-      <input name="username" required autocomplete="username" />
-      <label>Password</label>
-      <input name="password" type="password" required autocomplete="current-password" />
-      <button type="submit">Sign In</button>
-    </form>
-  </section>
+  <div class="login-wrap">
+    <img src="${LOGO_PATH}" alt="STIX Market" class="logo" />
+    <div class="card">
+      <p class="card-title">STIX Market</p>
+      <p class="card-sub">Sign in to manage your store</p>
+      ${banner}
+      <form method="post" action="${ADMIN_PATH}">
+        <input type="hidden" name="action" value="login" />
+        <label>Username</label>
+        <input name="username" required autocomplete="username" placeholder="Enter username" />
+        <label>Password</label>
+        <input name="password" type="password" required autocomplete="current-password" placeholder="Enter password" />
+        <button type="submit">Sign In</button>
+      </form>
+    </div>
+  </div>
 </body>
 </html>`;
 }
@@ -478,7 +573,6 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
     <input type="hidden" name="action" value="logout" />
     <button type="submit" class="tab-btn">Log Out</button>
   </form>
-  <p class="warn"><strong>Storage:</strong> runtime data directory is <code>${esc(DATA_DIR)}</code>. On Railway, mount a persistent volume here or uploads/catalog changes disappear after redeploys.</p>
   ${banner}
 
   <div class="tabs">
@@ -958,6 +1052,20 @@ async function handleAdminPost(req, session) {
       });
     }
 
+    if (fields.action === 'delete_product') {
+      const product = catalog.findProduct(fields.productId);
+      if (!product) throw new Error('Product not found');
+      if (!canManageProduct(session, product)) throw new Error('You can only delete your own files');
+      catalog.deleteProduct(fields.productId);
+      auth.recordActivity({
+        actor: session.username,
+        role: session.role,
+        action: 'delete_product',
+        detail: `Deleted product: ${product.name} (${product.id})`,
+      });
+      return pageHtml(session, { ok: `Deleted ${product.name}`, activeTab: 'recent' });
+    }
+
     throw new Error('Unknown action');
   } catch (e) {
     cleanupFiles(parsed.files);
@@ -973,6 +1081,19 @@ async function tryHandleCatalogAdmin(req, res) {
   } catch {
     return false;
   }
+
+  if (pathname === LOGO_PATH && req.method === 'GET') {
+    const logoFile = path.join(PROJECT_DIR, 'assets', 'Market.png');
+    if (fs.existsSync(logoFile)) {
+      const data = fs.readFileSync(logoFile);
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+      res.end(data);
+    } else {
+      res.writeHead(404); res.end();
+    }
+    return true;
+  }
+
   if (pathname !== ADMIN_PATH) return false;
 
   if (!auth.configuredUsers().length) {
@@ -1036,4 +1157,4 @@ async function tryHandleCatalogAdmin(req, res) {
   return true;
 }
 
-module.exports = { tryHandleCatalogAdmin, ADMIN_PATH };
+module.exports = { tryHandleCatalogAdmin, ADMIN_PATH, LOGO_PATH };

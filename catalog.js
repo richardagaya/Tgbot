@@ -361,6 +361,20 @@ function updateProduct(productId, patch) {
   return cat.products[idx];
 }
 
+function deleteProduct(productId) {
+  const cat = loadCatalog();
+  const idx = cat.products.findIndex((p) => p.id === productId);
+  if (idx === -1) throw new Error('Product not found');
+  const [removed] = cat.products.splice(idx, 1);
+  walkStore(cat.store, (node) => {
+    if (Array.isArray(node.productIds)) {
+      node.productIds = node.productIds.filter((pid) => pid !== productId);
+    }
+  });
+  saveCatalog(cat);
+  return removed;
+}
+
 function encodeStorePath(parts) {
   if (!parts || parts.length === 0) return 'browse';
   return `st:${parts.join(':')}`;
@@ -488,6 +502,7 @@ module.exports = {
   addSection,
   addProduct,
   updateProduct,
+  deleteProduct,
   updateStoreNode,
   deleteStoreNode,
   invalidateCatalogCache,
