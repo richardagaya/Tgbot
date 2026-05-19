@@ -634,7 +634,7 @@ function sendLeafQtyIntro(chatId, parts, userId) {
   const stockLine =
     stock === null ? '📦 <b>Available:</b> in stock' : `📦 <b>Available:</b> ${stock}`;
 
-  let body = `📂 <b>${escapeHtml(node.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}\n💵 <b>Price each:</b> ${formatBalance(
+  let body = `📂 <b>${escapeHtml(node.name)}</b>\n\n<b>${escapeHtml(product.name)}</b>\n\n${escapeHtml(desc)}\n\n${stockLine}\n💵 <b>Price each:</b> ${formatBalance(
     product.price
   )}\n\n`;
 
@@ -824,6 +824,10 @@ function sendBrowseAt(chatId, parts, userId) {
     if (children.length > 0) {
       body = `📂 <b>${escapeHtml(r.node.name)}</b>`;
       if (r.node.description) body += `\n\n${escapeHtml(r.node.description)}`;
+      const list = ids.map((id) => catalog.findProduct(id)).filter(Boolean);
+      for (const p of list) {
+        rows.push([{ text: `${p.name} — ${formatBalance(p.price)}`, callback_data: `product_${p.id}` }]);
+      }
       for (const child of children) {
         rows.push([{ text: child.name, callback_data: catalog.encodeStorePath([...parts, child.id]) }]);
       }
@@ -1623,6 +1627,27 @@ bot.onText(/\/payments/, (msg) => {
     .map((p) => `• User \`${p.userId}\` — $${p.usdAmount} ${p.currency.toUpperCase()} — *${p.status}*\n  ID: \`${p.paymentId}\``)
     .join('\n\n');
   bot.sendMessage(msg.chat.id, `⏳ *Active payments (${active.length}):*\n\n${text}`, { parse_mode: 'Markdown' });
+});
+
+// /debug_catalog — admin-only shop visibility check
+bot.onText(/\/debug_catalog/, async (msg) => {
+  if (String(msg.from.id) !== process.env.ADMIN_CHAT_ID) return;
+  await appReady;
+  await firebaseRepo.refreshFromFirestore();
+  const products = catalog.getProducts();
+  const nodes = catalog.listStoreNodes();
+  const lines = products.slice(-15).reverse().map((p) => {
+    const locations = nodes
+      .filter((node) => {
+        const hit = catalog.resolveStoreNode(node.path);
+        return hit?.node && (hit.node.productIds || []).includes(p.id);
+      })
+      .map((node) => node.label)
+      .join(' / ') || 'NOT ATTACHED';
+    return `• ${p.id}: ${p.name}\n  ${locations}`;
+  });
+  const body = lines.length ? lines.join('\n\n') : 'No products in catalog.';
+  bot.sendMessage(msg.chat.id, `Catalog products: ${products.length}\n\n${body}`, { parse_mode: 'HTML' });
 });
 
 async function startTelegramRuntime() {
