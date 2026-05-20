@@ -77,6 +77,38 @@ function fileExists(localPath) {
   }
 }
 
+async function objectExists(objectName) {
+  if (!storageEnabled()) return false;
+  try {
+    const bucket = getBucket();
+    const [exists] = await bucket.file(objectName).exists();
+    return exists;
+  } catch {
+    return false;
+  }
+}
+
+async function getObjectSize(objectName) {
+  if (!storageEnabled()) return null;
+  try {
+    const bucket = getBucket();
+    const [metadata] = await bucket.file(objectName).getMetadata();
+    return Number(metadata.size) || 0;
+  } catch {
+    return null;
+  }
+}
+
+async function getSignedDownloadUrl(objectName, expiresMs = 24 * 60 * 60 * 1000) {
+  if (!storageEnabled()) throw new Error('Firebase Storage is not configured');
+  const bucket = getBucket();
+  const [url] = await bucket.file(objectName).getSignedUrl({
+    action: 'read',
+    expires: Date.now() + expiresMs,
+  });
+  return url;
+}
+
 module.exports = {
   storageEnabled,
   storageObjectName,
@@ -86,4 +118,7 @@ module.exports = {
   downloadToTemp,
   createReadStream,
   fileExists,
+  objectExists,
+  getObjectSize,
+  getSignedDownloadUrl,
 };

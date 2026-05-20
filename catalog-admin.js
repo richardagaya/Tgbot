@@ -1,6 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { Transform } = require('stream');
 const Busboy = require('busboy');
 const catalog = require('./catalog');
 const auth = require('./admin-auth');
@@ -116,8 +117,72 @@ function readMultipart(req, limitMb = MAX_UPLOAD_FILE_MB) {
   });
 }
 
+// Streams files directly to GCS (no temp disk). Returns files with objectName instead of tempPath.
+function readMultipartGCS(req) {
+  return new Promise((resolve, reject) => {
+    const fields = {};
+    const files = [];
+    const uploads = [];
+
+    const busboy = Busboy({
+      headers: req.headers,
+      limits: { files: MAX_UPLOAD_FILES, fields: 80 },
+    });
+
+    busboy.on('field', (name, val) => {
+      fields[name] = val;
+    });
+
+    busboy.on('file', (fieldname, stream, info) => {
+      const originalName = cleanFilename(info.filename);
+      if (!originalName) {
+        stream.resume();
+        return;
+      }
+
+      // Determine object path from fields accumulated so far.
+      const knownProductId = fields.productId;
+      const uploadKind = fields.action === 'add_inventory_files' ? 'inventory' : 'delivery';
+      const prefix = knownProductId
+        ? firebaseStorage.storageObjectName('products', knownProductId, uploadKind)
+        : firebaseStorage.storageObjectName('uploads', 'pending', `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      const objectName = firebaseStorage.storageObjectName(prefix, `${Date.now()}-${files.length}-${originalName}`);
+
+      let sizeBytes = 0;
+      const sizeTracker = new Transform({
+        transform(chunk, _enc, cb) {
+          sizeBytes += chunk.length;
+          this.push(chunk);
+          cb();
+        },
+      });
+
+      const p = firebaseStorage
+        .uploadStream(stream.pipe(sizeTracker), objectName)
+        .then(() => {
+          files.push({ fieldname, originalName, objectName, sizeBytes, tempPath: null, size: sizeBytes });
+        })
+        .catch((e) => {
+          stream.resume();
+          return Promise.reject(e);
+        });
+
+      uploads.push(p);
+    });
+
+    busboy.on('error', reject);
+    busboy.on('finish', () => {
+      Promise.all(uploads)
+        .then(() => resolve({ fields, files }))
+        .catch(reject);
+    });
+    req.pipe(busboy);
+  });
+}
+
 function cleanupFiles(files) {
   for (const f of files || []) {
+    if (!f.tempPath) continue;
     try {
       if (fs.existsSync(f.tempPath)) fs.unlinkSync(f.tempPath);
     } catch (_) {}
@@ -152,6 +217,22 @@ async function moveDeliveryZipFile(product, files, { replace = false } = {}) {
   if (!String(file.originalName || '').toLowerCase().endsWith('.zip')) {
     throw new Error('Only .zip files can be uploaded');
   }
+  if (file.objectName) {
+    // File was already streamed to GCS via readMultipartGCS — no further upload needed.
+    const prefix = firebaseStorage.storageObjectName('products', product.id, 'delivery');
+    if (replace) await firebaseStorage.deletePrefix(`${prefix}/`);
+    return {
+      patch: {
+        deliveryStoragePath: file.objectName,
+        deliveryFileSizeBytes: file.sizeBytes || null,
+        deliveryZipPath: null,
+        filePath: null,
+        deliveryFolder: null,
+        inventoryFolder: null,
+        inventoryStoragePrefix: null,
+      },
+    };
+  }
   if (firebaseStorage.storageEnabled()) {
     const prefix = firebaseStorage.storageObjectName('products', product.id, 'delivery');
     if (replace) await firebaseStorage.deletePrefix(`${prefix}/`);
@@ -163,6 +244,7 @@ async function moveDeliveryZipFile(product, files, { replace = false } = {}) {
     return {
       patch: {
         deliveryStoragePath: objectName,
+        deliveryFileSizeBytes: file.size || null,
         deliveryZipPath: null,
         filePath: null,
         deliveryFolder: null,
@@ -196,6 +278,39 @@ async function moveInventoryFiles(product, files, { replace = false } = {}) {
     if (!String(f.originalName || '').toLowerCase().endsWith('.zip')) {
       throw new Error('Only .zip files can be uploaded');
     }
+  }
+  if (files[0].objectName) {
+    // Files already streamed to GCS via readMultipartGCS — register them without re-uploading.
+    const db = firebaseRepo.getDb();
+    if (!Array.isArray(db.inventoryItems)) db.inventoryItems = [];
+    const prefix = firebaseStorage.storageObjectName('products', product.id, 'inventory');
+    if (replace) {
+      db.inventoryItems = db.inventoryItems.filter((item) => item.productId !== product.id || item.status === 'sold');
+    }
+    for (const f of files) {
+      db.inventoryItems.push({
+        id: `${product.id}_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+        productId: product.id,
+        filename: f.originalName,
+        storagePath: f.objectName,
+        sizeBytes: f.sizeBytes || 0,
+        status: 'available',
+        createdAt: new Date().toISOString(),
+      });
+    }
+    firebaseRepo.saveDb(db);
+    const count = db.inventoryItems.filter((item) => item.productId === product.id && item.status !== 'sold').length;
+    return {
+      patch: {
+        inventoryStoragePrefix: prefix,
+        inventoryFolder: null,
+        filePath: null,
+        deliveryFolder: null,
+        deliveryZipPath: null,
+        deliveryStoragePath: null,
+      },
+      count,
+    };
   }
   if (firebaseStorage.storageEnabled()) {
     const db = firebaseRepo.getDb();
@@ -614,7 +729,10 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
       </select>
       <label>Upload File</label>
       <input name="files" type="file" accept=".zip,application/zip" multiple required />
-      <p class="hint">Reusable and single-sale products use one ZIP. Limited stock products use one ZIP per available item. For large stock, upload the first batch here, then add more from Recently Added.</p>
+      <p class="hint">${firebaseStorage.storageEnabled()
+        ? 'No per-file size limit — files stream directly to storage. Upload one batch at a time; add more stock from Recently Added.'
+        : `Files up to ${esc(String(MAX_UPLOAD_FILE_MB))} MB each. Limited stock: one ZIP per available sale. For large stock, upload the first batch here, then add more from Recently Added.`
+      }</p>
       <button type="submit">Upload File</button>
     </form>
   </section>
@@ -881,6 +999,60 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
     setupCategoryParentCascade();
     setupCategoryEdit();
     setupCategoryDeleteCascade();
+
+    // Upload progress overlay for large files
+    (function () {
+      var THRESHOLD = 10 * 1024 * 1024; // show progress for uploads > 10 MB
+      function fmtBytes(b) {
+        if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+        if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+        return (b / 1073741824).toFixed(2) + ' GB';
+      }
+      function interceptForm(form) {
+        form.addEventListener('submit', function (e) {
+          var inputs = form.querySelectorAll('input[type=file]');
+          var total = 0;
+          for (var fi = 0; fi < inputs.length; fi++) {
+            var fl = inputs[fi].files;
+            for (var i = 0; i < fl.length; i++) total += fl[i].size;
+          }
+          if (total < THRESHOLD) return;
+          e.preventDefault();
+          var overlay = document.createElement('div');
+          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+          overlay.innerHTML = '<div style="background:#fff;border-radius:18px;padding:2rem 2.5rem;width:90%;max-width:30rem;text-align:center">' +
+            '<p style="margin:0 0 1rem;font-weight:800;font-size:1.05rem">Uploading\u2026</p>' +
+            '<div style="background:#e5e7eb;border-radius:9999px;height:14px;overflow:hidden;margin:0 0 0.75rem">' +
+            '<div id="_upbar" style="background:#111827;height:100%;width:0%;transition:width .2s"></div></div>' +
+            '<p id="_uptxt" style="color:#667085;font-size:.88rem;margin:0">Preparing\u2026</p></div>';
+          document.body.appendChild(overlay);
+          var fd = new FormData(form);
+          var xhr = new XMLHttpRequest();
+          xhr.upload.onprogress = function (ev) {
+            if (!ev.lengthComputable) return;
+            var pct = Math.round(ev.loaded / ev.total * 100);
+            document.getElementById('_upbar').style.width = pct + '%';
+            document.getElementById('_uptxt').textContent = pct + '%  \u2014  ' + fmtBytes(ev.loaded) + ' / ' + fmtBytes(ev.total);
+          };
+          xhr.onload = function () {
+            document.body.removeChild(overlay);
+            if (xhr.status === 200) { document.open(); document.write(xhr.responseText); document.close(); }
+            else { alert('Upload failed (HTTP ' + xhr.status + '). Please try again.'); }
+          };
+          xhr.onerror = function () {
+            document.body.removeChild(overlay);
+            alert('Upload failed. Check your connection and try again.');
+          };
+          var btn = form.querySelector('[type=submit]');
+          if (btn) btn.disabled = true;
+          xhr.open('POST', form.action || window.location.href);
+          xhr.send(fd);
+        });
+      }
+      document.querySelectorAll('form').forEach(function (f) {
+        if (f.querySelector('input[type=file]')) interceptForm(f);
+      });
+    }());
   </script>
 </body>
 </html>`;
@@ -888,7 +1060,11 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
 
 async function parsePost(req) {
   const ct = (req.headers['content-type'] || '').split(';')[0].trim();
-  if (ct === 'multipart/form-data') return readMultipart(req);
+  if (ct === 'multipart/form-data') {
+    // When Firebase Storage is available, stream files directly to GCS (no temp disk, no file size cap).
+    if (firebaseStorage.storageEnabled()) return readMultipartGCS(req);
+    return readMultipart(req);
+  }
   if (ct === 'application/x-www-form-urlencoded') {
     const raw = await readBody(req);
     const params = new URLSearchParams(raw);

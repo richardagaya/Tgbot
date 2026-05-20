@@ -23,6 +23,11 @@ if (!process.env.BOT_TOKEN || String(process.env.BOT_TOKEN).trim() === '') {
 
 // Railway / Render: PORT. Local admin UI: set ADMIN_HTTP_PORT if you have no PORT.
 const HTTP_PORT = Number(process.env.PORT || process.env.ADMIN_HTTP_PORT || 0);
+
+// Files above this threshold are delivered via a private signed download link instead of
+// Telegram sendDocument (Telegram bot limit is ~50 MB).
+const LARGE_FILE_THRESHOLD_BYTES = Number(process.env.LARGE_FILE_THRESHOLD_MB || 45) * 1024 * 1024;
+const SIGNED_URL_EXPIRY_MS = Number(process.env.SIGNED_URL_EXPIRY_HOURS || 24) * 60 * 60 * 1000;
 const TELEGRAM_MODE = String(process.env.TELEGRAM_MODE || (process.env.K_SERVICE ? 'webhook' : 'polling')).toLowerCase();
 const WEBHOOK_PATH = process.env.TELEGRAM_WEBHOOK_PATH || '/telegram/webhook';
 const TASK_SECRET = process.env.TASK_SECRET || process.env.ADMIN_SESSION_SECRET || '';
@@ -1434,19 +1439,31 @@ async function deliverPurchasedFiles(chatId, product, qty = 1) {
     const sentAt = new Date().toISOString();
     for (let i = 0; i < selected.length; i += 1) {
       const item = selected[i];
-      const tempPath = await firebaseStorage.downloadToTemp(item.storagePath, item.filename || `${product.id}.zip`);
-      try {
-        await bot.sendDocument(chatId, fs.createReadStream(tempPath), {
-          caption: `📥 *${product.name}*${selected.length > 1 ? `\n\nFile ${i + 1} of ${selected.length}` : ''}`,
-          parse_mode: 'Markdown',
-        }, {
-          filename: item.filename || path.basename(tempPath),
-          contentType: 'application/zip',
-        });
-      } finally {
+      const caption = `📥 *${product.name}*${selected.length > 1 ? `\n\nFile ${i + 1} of ${selected.length}` : ''}`;
+      const fileSize = item.sizeBytes != null ? item.sizeBytes : await firebaseStorage.getObjectSize(item.storagePath);
+      if (fileSize != null && fileSize > LARGE_FILE_THRESHOLD_BYTES) {
+        const url = await firebaseStorage.getSignedDownloadUrl(item.storagePath, SIGNED_URL_EXPIRY_MS);
+        const hours = Math.round(SIGNED_URL_EXPIRY_MS / 3600000);
+        await bot.sendMessage(
+          chatId,
+          `${caption}\n\nYour file is ready — tap to download *(link expires in ${hours}h)*:\n${url}`,
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        const tempPath = await firebaseStorage.downloadToTemp(item.storagePath, item.filename || `${product.id}.zip`);
         try {
-          fs.unlinkSync(tempPath);
-        } catch (_) {}
+          await bot.sendDocument(chatId, fs.createReadStream(tempPath), {
+            caption,
+            parse_mode: 'Markdown',
+          }, {
+            filename: item.filename || path.basename(tempPath),
+            contentType: 'application/zip',
+          });
+        } finally {
+          try {
+            fs.unlinkSync(tempPath);
+          } catch (_) {}
+        }
       }
       item.status = 'sold';
       item.soldAt = sentAt;
@@ -1498,6 +1515,18 @@ async function deliverFile(chatId, product) {
   let tempZip = null;
   try {
     if (product.deliveryStoragePath) {
+      const fileSize = product.deliveryFileSizeBytes != null
+        ? product.deliveryFileSizeBytes
+        : await firebaseStorage.getObjectSize(product.deliveryStoragePath);
+      if (fileSize != null && fileSize > LARGE_FILE_THRESHOLD_BYTES) {
+        const url = await firebaseStorage.getSignedDownloadUrl(product.deliveryStoragePath, SIGNED_URL_EXPIRY_MS);
+        const hours = Math.round(SIGNED_URL_EXPIRY_MS / 3600000);
+        return bot.sendMessage(
+          chatId,
+          `📥 *${product.name}*\n\nYour file is ready — tap to download *(link expires in ${hours}h)*:\n${url}`,
+          { parse_mode: 'Markdown' }
+        );
+      }
       const tempPath = await firebaseStorage.downloadToTemp(product.deliveryStoragePath, safeZipFilename(product.name));
       tempZip = tempPath;
       return bot.sendDocument(chatId, fs.createReadStream(tempPath), {
