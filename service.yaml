@@ -1,0 +1,15 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: tg-bot
+spec:
+  template:
+    spec:
+      containers:
+      - image: IMAGE_URL
+        resources:
+          limits:
+            cpu: "1"
+            memory: "512Mi"
+      containerConcurrency: 80
+      timeoutSeconds: 300

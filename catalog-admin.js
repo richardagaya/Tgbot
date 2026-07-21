@@ -15,7 +15,7 @@ const ADMIN_PATH = '/admin/catalog';
 const LOGO_PATH = '/admin/logo';
 const UPLOADS_DIR = runtimeDir('uploads');
 const MAX_UPLOAD_FILES = Number(process.env.MAX_UPLOAD_FILES || 200);
-const MAX_UPLOAD_FILE_MB = Number(process.env.MAX_UPLOAD_FILE_MB || 200);
+const MAX_UPLOAD_FILE_MB = Number(process.env.MAX_UPLOAD_FILE_MB || 30);
 
 function esc(s) {
   return String(s)
@@ -701,9 +701,10 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
 
   <section class="card tab-panel ${tab === 'add-file' ? 'active' : ''}" id="tab-add-file">
     <h2>Add File</h2>
-    <form method="post" action="${ADMIN_PATH}" enctype="multipart/form-data">
+    <form method="post" action="${ADMIN_PATH}" enctype="multipart/form-data" id="addProductForm">
       <input type="hidden" name="action" value="add_product" />
       <input type="hidden" name="leaf" id="productLeaf" />
+      <input type="hidden" name="uploadedObjectNames" id="uploadedObjectNames" />
       <label>Category</label>
       <select id="productCat" required></select>
       <div id="productSubWrap">
@@ -728,12 +729,16 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
         <option value="limited">Limited stock - one uploaded ZIP per sale</option>
       </select>
       <label>Upload File</label>
-      <input name="files" type="file" accept=".zip,application/zip" multiple required />
+      <input name="files" type="file" accept=".zip,application/zip" multiple required id="fileInput" />
       <p class="hint">${firebaseStorage.storageEnabled()
-        ? 'No per-file size limit — files stream directly to storage. Upload one batch at a time; add more stock from Recently Added.'
+        ? 'Files upload directly to cloud storage (no size limit). Large files may take longer to upload.'
         : `Files up to ${esc(String(MAX_UPLOAD_FILE_MB))} MB each. Limited stock: one ZIP per available sale. For large stock, upload the first batch here, then add more from Recently Added.`
       }</p>
-      <button type="submit">Upload File</button>
+      <button type="submit" id="submitBtn">Upload File</button>
+      <div id="uploadProgress" style="display:none; margin-top:10px;">
+        <progress value="0" max="100" id="progressBar"></progress>
+        <span id="progressText">Uploading...</span>
+      </div>
     </form>
   </section>
 
@@ -1003,6 +1008,7 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
     // Upload progress overlay for large files
     (function () {
       var THRESHOLD = 10 * 1024 * 1024; // show progress for uploads > 10 MB
+      var FIREBASE_ENABLED = ${firebaseStorage.storageEnabled()};
       function fmtBytes(b) {
         if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
         if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
@@ -1016,7 +1022,7 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
             var fl = inputs[fi].files;
             for (var i = 0; i < fl.length; i++) total += fl[i].size;
           }
-          if (total < THRESHOLD) return;
+          if (total < THRESHOLD && !FIREBASE_ENABLED) return;
           e.preventDefault();
           var overlay = document.createElement('div');
           overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center';
@@ -1026,27 +1032,104 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
             '<div id="_upbar" style="background:#111827;height:100%;width:0%;transition:width .2s"></div></div>' +
             '<p id="_uptxt" style="color:#667085;font-size:.88rem;margin:0">Preparing\u2026</p></div>';
           document.body.appendChild(overlay);
-          var fd = new FormData(form);
-          var xhr = new XMLHttpRequest();
-          xhr.upload.onprogress = function (ev) {
-            if (!ev.lengthComputable) return;
-            var pct = Math.round(ev.loaded / ev.total * 100);
-            document.getElementById('_upbar').style.width = pct + '%';
-            document.getElementById('_uptxt').textContent = pct + '%  \u2014  ' + fmtBytes(ev.loaded) + ' / ' + fmtBytes(ev.total);
-          };
-          xhr.onload = function () {
-            document.body.removeChild(overlay);
-            if (xhr.status === 200) { document.open(); document.write(xhr.responseText); document.close(); }
-            else { alert('Upload failed (HTTP ' + xhr.status + '). Please try again.'); }
-          };
-          xhr.onerror = function () {
-            document.body.removeChild(overlay);
-            alert('Upload failed. Check your connection and try again.');
-          };
-          var btn = form.querySelector('[type=submit]');
-          if (btn) btn.disabled = true;
-          xhr.open('POST', form.action || window.location.href);
-          xhr.send(fd);
+
+          if (FIREBASE_ENABLED) {
+            // Direct browser-to-GCS upload using signed URLs
+            var fileInput = document.getElementById('fileInput');
+            var files = fileInput.files;
+            var uploadedNames = [];
+            var currentFile = 0;
+
+            function uploadNextFile() {
+              if (currentFile >= files.length) {
+                // All files uploaded, submit form with object names
+                document.getElementById('uploadedObjectNames').value = JSON.stringify(uploadedNames);
+                var fd = new FormData(form);
+                fd.delete('files'); // Remove file input
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', form.action);
+                xhr.onload = function () {
+                  document.body.removeChild(overlay);
+                  if (xhr.status === 200) { document.open(); document.write(xhr.responseText); document.close(); }
+                  else { alert('Upload failed (HTTP ' + xhr.status + '). Please try again.'); }
+                };
+                xhr.onerror = function () {
+                  document.body.removeChild(overlay);
+                  alert('Upload failed. Check your connection and try again.');
+                };
+                xhr.send(fd);
+                return;
+              }
+
+              var file = files[currentFile];
+              var objectName = 'uploads/pending/' + Date.now() + '-' + currentFile + '-' + file.name.replace(/[^\\w.\\- ()]/g, '_');
+              
+              document.getElementById('_uptxt').textContent = 'Requesting upload URL for ' + file.name + '...';
+
+              fetch('/admin/catalog/upload-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ objectName: objectName, contentType: 'application/zip' })
+              })
+              .then(function(res) { return res.json(); })
+              .then(function(data) {
+                if (!data.url) throw new Error('Failed to get upload URL');
+                
+                document.getElementById('_uptxt').textContent = 'Uploading ' + file.name + '...';
+                
+                var xhr = new XMLHttpRequest();
+                xhr.open('PUT', data.url);
+                xhr.upload.onprogress = function(ev) {
+                  if (!ev.lengthComputable) return;
+                  var filePct = Math.round(ev.loaded / ev.total * 100);
+                  var totalPct = Math.round((currentFile + filePct / 100) / files.length * 100);
+                  document.getElementById('_upbar').style.width = totalPct + '%';
+                  document.getElementById('_uptxt').textContent = filePct + '%  \u2014  ' + fmtBytes(ev.loaded) + ' / ' + fmtBytes(ev.total);
+                };
+                xhr.onload = function() {
+                  if (xhr.status === 200) {
+                    uploadedNames.push(objectName);
+                    currentFile++;
+                    uploadNextFile();
+                  } else {
+                    document.body.removeChild(overlay);
+                    alert('Upload failed for ' + file.name + ' (HTTP ' + xhr.status + '). Please try again.');
+                  }
+                };
+                xhr.onerror = function() {
+                  document.body.removeChild(overlay);
+                  alert('Upload failed for ' + file.name + '. Check your connection and try again.');
+                };
+                xhr.send(file);
+              })
+              .catch(function(err) {
+                document.body.removeChild(overlay);
+                alert('Error: ' + err.message);
+              });
+            }
+
+            uploadNextFile();
+          } else {
+            // Regular upload via server
+            var fd = new FormData(form);
+            var xhr = new XMLHttpRequest();
+            xhr.upload.onprogress = function (ev) {
+              if (!ev.lengthComputable) return;
+              var pct = Math.round(ev.loaded / ev.total * 100);
+              document.getElementById('_upbar').style.width = pct + '%';
+              document.getElementById('_uptxt').textContent = pct + '%  \u2014  ' + fmtBytes(ev.loaded) + ' / ' + fmtBytes(ev.total);
+            };
+            xhr.onload = function () {
+              document.body.removeChild(overlay);
+              if (xhr.status === 200) { document.open(); document.write(xhr.responseText); document.close(); }
+              else { alert('Upload failed (HTTP ' + xhr.status + '). Please try again.'); }
+            };
+            xhr.onerror = function () {
+              document.body.removeChild(overlay);
+              alert('Upload failed. Check your connection and try again.');
+            };
+            xhr.send(fd);
+          }
         });
       }
       document.querySelectorAll('form').forEach(function (f) {
@@ -1108,6 +1191,22 @@ async function handleAdminPost(req, session) {
     }
 
     if (fields.action === 'add_product') {
+      // Handle direct GCS uploads (object names sent instead of files)
+      if (fields.uploadedObjectNames) {
+        try {
+          const objectNames = JSON.parse(fields.uploadedObjectNames);
+          files = objectNames.map((objectName, index) => ({
+            fieldname: 'files',
+            originalName: objectName.split('/').pop().replace(/^\d+-\d+-/, ''),
+            objectName,
+            tempPath: null,
+            size: 0,
+          }));
+        } catch (e) {
+          throw new Error('Invalid uploaded object names');
+        }
+      }
+      
       if (!files.length) throw new Error('Upload at least one delivery document');
       const target = catalog.resolveStoreNode(fields.leaf);
       if (!target || !target.node) throw new Error('Choose a category for this file');
@@ -1189,6 +1288,23 @@ async function handleAdminPost(req, session) {
       const product = catalog.findProduct(fields.productId);
       if (!product) throw new Error('Product not found');
       if (!canManageProduct(session, product)) throw new Error('You can only update your own files');
+      
+      // Handle direct GCS uploads
+      if (fields.uploadedObjectNames) {
+        try {
+          const objectNames = JSON.parse(fields.uploadedObjectNames);
+          files = objectNames.map((objectName, index) => ({
+            fieldname: 'files',
+            originalName: objectName.split('/').pop().replace(/^\d+-\d+-/, ''),
+            objectName,
+            tempPath: null,
+            size: 0,
+          }));
+        } catch (e) {
+          throw new Error('Invalid uploaded object names');
+        }
+      }
+      
       if (!files.length) throw new Error('Upload at least one delivery document');
       if (product.purchaseType === 'limited') {
         throw new Error('Use Add stock ZIPs for limited-stock products');
@@ -1208,6 +1324,23 @@ async function handleAdminPost(req, session) {
       if (!product) throw new Error('Product not found');
       if (!canManageProduct(session, product)) throw new Error('You can only update your own files');
       if (product.purchaseType !== 'limited') throw new Error('Only limited-stock products can receive stock batches');
+      
+      // Handle direct GCS uploads
+      if (fields.uploadedObjectNames) {
+        try {
+          const objectNames = JSON.parse(fields.uploadedObjectNames);
+          files = objectNames.map((objectName, index) => ({
+            fieldname: 'files',
+            originalName: objectName.split('/').pop().replace(/^\d+-\d+-/, ''),
+            objectName,
+            tempPath: null,
+            size: 0,
+          }));
+        } catch (e) {
+          throw new Error('Invalid uploaded object names');
+        }
+      }
+      
       if (!files.length) throw new Error('Upload at least one stock document');
       const moved = await moveInventoryFiles(product, files);
       catalog.updateProduct(product.id, moved.patch);
@@ -1266,6 +1399,26 @@ async function tryHandleCatalogAdmin(req, res) {
       res.end(data);
     } else {
       res.writeHead(404); res.end();
+    }
+    return true;
+  }
+
+  if (pathname === '/admin/catalog/upload-url' && req.method === 'POST') {
+    if (!session) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return true;
+    }
+    try {
+      const body = await readBody(req, 10 * 1024);
+      const { objectName, contentType } = JSON.parse(body);
+      if (!objectName) throw new Error('objectName required');
+      const url = await firebaseStorage.getSignedUploadUrl(objectName, contentType || 'application/zip');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ url, objectName }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
     }
     return true;
   }

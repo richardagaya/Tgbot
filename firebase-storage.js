@@ -109,6 +109,17 @@ async function getSignedDownloadUrl(objectName, expiresMs = 24 * 60 * 60 * 1000)
   return url;
 }
 
+async function getSignedUploadUrl(objectName, contentType = 'application/zip', expiresMs = 15 * 60 * 1000) {
+  if (!storageEnabled()) throw new Error('Firebase Storage is not configured');
+  const bucket = getBucket();
+  const [url] = await bucket.file(objectName).getSignedUrl({
+    action: 'write',
+    contentType,
+    expires: Date.now() + expiresMs,
+  });
+  return url;
+}
+
 module.exports = {
   storageEnabled,
   storageObjectName,
@@ -121,4 +132,5 @@ module.exports = {
   objectExists,
   getObjectSize,
   getSignedDownloadUrl,
+  getSignedUploadUrl,
 };
