@@ -126,7 +126,7 @@ function readMultipartGCS(req) {
 
     const busboy = Busboy({
       headers: req.headers,
-      limits: { files: MAX_UPLOAD_FILES, fields: 80 },
+      limits: { files: MAX_UPLOAD_FILES, fileSize: MAX_UPLOAD_FILE_MB * 1024 * 1024, fields: 80 },
     });
 
     busboy.on('field', (name, val) => {
