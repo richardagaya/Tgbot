@@ -1071,7 +1071,14 @@ function pageHtml(session, { ok, err, activeTab } = {}) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ objectName: objectName, contentType: 'application/zip' })
               })
-              .then(function(res) { return res.json(); })
+              .then(function(res) {
+                return res.text().then(function(text) {
+                  var data;
+                  try { data = JSON.parse(text); } catch (_) { throw new Error(text || ('HTTP ' + res.status)); }
+                  if (!res.ok) throw new Error(data.error || text || ('HTTP ' + res.status));
+                  return data;
+                });
+              })
               .then(function(data) {
                 if (!data.url) throw new Error('Failed to get upload URL');
                 
@@ -1391,6 +1398,8 @@ async function tryHandleCatalogAdmin(req, res) {
     return false;
   }
 
+  const session = auth.readSession(req);
+
   if (pathname === LOGO_PATH && req.method === 'GET') {
     const logoFile = path.join(PROJECT_DIR, 'assets', 'Market.png');
     if (fs.existsSync(logoFile)) {
@@ -1432,8 +1441,6 @@ async function tryHandleCatalogAdmin(req, res) {
     );
     return true;
   }
-
-  const session = auth.readSession(req);
 
   if (req.method === 'GET') {
     if (!session) {
